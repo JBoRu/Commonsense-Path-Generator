@@ -195,16 +195,19 @@ class LMRelationNetDataLoader(object):
         self.use_contextualized = use_contextualized
 
         model_type = MODEL_NAME_TO_CLASS[model_name]
+        # 1-1-5
         self.train_qids, self.train_labels, *self.train_data = load_input_tensors(train_statement_path, model_type, model_name, max_seq_length)
         self.dev_qids, self.dev_labels, *self.dev_data = load_input_tensors(dev_statement_path, model_type, model_name, max_seq_length)
 
         num_choice = self.train_data[0].size(1)
 
+        # 5
         with open(path_embedding_path, 'rb') as handle:
             path_embedding = pickle.load(handle)
         self.train_data += [path_embedding['train']]
         self.dev_data += [path_embedding['dev']]
 
+        # 5
         self.train_data += load_2hop_relational_paths(train_rpath_jsonl, train_adj_path,
                                                       emb_pk_path=train_node_features_path if use_contextualized else None,
                                                       max_tuple_num=max_tuple_num, num_choice=num_choice, node_feature_type=node_feature_type)

@@ -3,7 +3,7 @@ from multiprocessing import Pool
 from tqdm import tqdm
 from utils.conceptnet import merged_relations
 from utils.layers import *
-from utils.utils import *
+from utils.utils_ import *
 
 id2concept = None
 concept2id = None

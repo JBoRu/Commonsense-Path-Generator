@@ -579,6 +579,7 @@ def load_bert_xlnet_roberta_input_tensors(statement_jsonl_path, model_type, mode
         features = []
         for ex_index, example in enumerate(examples):
             choices_features = []
+            # for one sample
             for ending_idx, (context, ending) in enumerate(zip(example.contexts, example.endings)):
                 tokens_a = tokenizer.tokenize(context)
                 tokens_b = tokenizer.tokenize(example.question + " " + ending)

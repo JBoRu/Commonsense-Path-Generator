@@ -106,6 +106,7 @@ def main():
     args = parser.parse_args()
     print(args)
 
+    # find relations between question entities and answer entities
     find_relational_paths(args.cpnet_vocab_path, args.cpnet_graph_path, args.train_concepts, args.train_rel_paths, args.nprocs, args.use_cache)
     find_relational_paths(args.cpnet_vocab_path, args.cpnet_graph_path, args.dev_concepts, args.dev_rel_paths, args.nprocs, args.use_cache)
     if args.test_statements is not None:
