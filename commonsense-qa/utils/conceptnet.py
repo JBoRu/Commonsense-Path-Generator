@@ -7,9 +7,9 @@ import numpy as np
 import sys
 
 try:
-    from .utils import check_file
+    from .utils_ import check_file
 except ImportError:
-    from utils import check_file
+    from utils_ import check_file
 
 __all__ = ['extract_english', 'construct_graph', 'merged_relations']
 

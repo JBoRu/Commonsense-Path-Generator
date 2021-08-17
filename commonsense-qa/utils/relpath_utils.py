@@ -2,7 +2,6 @@ import networkx as nx
 from multiprocessing import Pool
 from tqdm import tqdm
 from utils.conceptnet import merged_relations
-from utils.layers import *
 from utils.utils_ import *
 
 id2concept = None
@@ -126,6 +125,7 @@ def find_relational_paths(cpnet_vocab_path, cpnet_graph_path, grounded_path, out
                 cpnet_simple.add_edge(u, v, weight=w)
         return cpnet_simple
 
+    # global variable used in all of functions in this .py file
     global concept2id, id2concept, relation2id, id2relation, cpnet_simple, cpnet
     if any(x is None for x in [concept2id, id2concept, relation2id, id2relation]):
         with open(cpnet_vocab_path, 'r', encoding='utf-8') as fin:

@@ -1,12 +1,12 @@
 import random
-from multiprocessing import cpu_count
 
 from transformers import *
 
-from modeling.modeling_rn_pg import *
+from modeling.kg_encoder import *
+from modeling.data_loader import *
 from utils.optimization_utils import OPTIMIZER_CLASSES
 from utils.parser_utils import *
-from utils.relpath_utils import *
+from utils.relpath_utils import find_relational_paths
 
 def get_node_feature_encoder(encoder_name):
     return encoder_name.replace('-cased', '-uncased')
@@ -41,70 +41,9 @@ def pred_to_file(eval_set, model, output_path):
 
 def main():
     parser = get_parser()
-    args, _ = parser.parse_known_args()
-    parser.add_argument('--mode', default='train', choices=['train', 'eval', 'pred'], help='run training or evaluation')
-    parser.add_argument('--save_dir', default=f'./saved_models/', help='model output directory')
-    parser.add_argument('--gen_dir', type=str)
-    parser.add_argument('--gen_id', type=int)
-
-    # for finding relation paths
-    parser.add_argument('--cpnet_vocab_path', default='./data/cpnet/concept.txt')
-    parser.add_argument('--cpnet_graph_path', default='./data/cpnet/conceptnet.en.pruned.graph')
-    parser.add_argument('-p', '--nprocs', type=int, default=cpu_count(), help='number of processes to use')
-
-    # data
-    parser.add_argument('--train_rel_paths', default=f'./data/{args.dataset}/paths/train.relpath.2hop.jsonl')
-    parser.add_argument('--dev_rel_paths', default=f'./data/{args.dataset}/paths/dev.relpath.2hop.jsonl')
-    parser.add_argument('--test_rel_paths', default=f'./data/{args.dataset}/paths/test.relpath.2hop.jsonl')
-    parser.add_argument('--train_adj', default=f'./data/{args.dataset}/graph/train.graph.adj.pk')
-    parser.add_argument('--dev_adj', default=f'./data/{args.dataset}/graph/dev.graph.adj.pk')
-    parser.add_argument('--test_adj', default=f'./data/{args.dataset}/graph/test.graph.adj.pk')
-    parser.add_argument('--train_node_features', default=f'./data/{args.dataset}/features/train.{get_node_feature_encoder(args.encoder)}.features.pk')
-    parser.add_argument('--dev_node_features', default=f'./data/{args.dataset}/features/dev.{get_node_feature_encoder(args.encoder)}.features.pk')
-    parser.add_argument('--test_node_features', default=f'./data/{args.dataset}/features/test.{get_node_feature_encoder(args.encoder)}.features.pk')
-    parser.add_argument('--train_concepts', default=f'./data/{args.dataset}/grounded/train.grounded.jsonl')
-    parser.add_argument('--dev_concepts', default=f'./data/{args.dataset}/grounded/dev.grounded.jsonl')
-    parser.add_argument('--test_concepts', default=f'./data/{args.dataset}/grounded/test.grounded.jsonl')
-
-    parser.add_argument('--node_feature_type', choices=['full', 'cls', 'mention'])
-    parser.add_argument('--use_cache', default=True, type=bool_flag, nargs='?', const=True, help='use cached data to accelerate data loading')
-    parser.add_argument('--max_tuple_num', default=100, type=int)
-
-    # model architecture
-    parser.add_argument('--ablation', default='att_pool', choices=['None', 'no_kg', 'no_2hop', 'no_1hop', 'no_qa', 'no_rel',
-                                                             'mrloss', 'fixrel', 'fakerel', 'no_factor_mul', 'no_2hop_qa',
-                                                             'randomrel', 'encode_qas', 'multihead_pool', 'att_pool'], nargs='?', const=None, help='run ablation test')
-    parser.add_argument('--att_head_num', default=2, type=int, help='number of attention heads')
-    parser.add_argument('--mlp_dim', default=128, type=int, help='number of MLP hidden units')
-    parser.add_argument('--mlp_layer_num', default=2, type=int, help='number of MLP layers')
-    parser.add_argument('--fc_dim', default=128, type=int, help='number of FC hidden units')
-    parser.add_argument('--fc_layer_num', default=0, type=int, help='number of FC layers')
-    parser.add_argument('--freeze_ent_emb', default=True, type=bool_flag, nargs='?', const=True, help='freeze entity embedding layer')
-    parser.add_argument('--init_range', default=0.02, type=float, help='stddev when initializing with normal distribution')
-    parser.add_argument('--emb_scale', default=1.0, type=float, help='scale pretrained embeddings')
-
-    # regularization
-    parser.add_argument('--dropoutm', type=float, default=0.3, help='dropout for mlp hidden units (0 = no dropout')
-
-    # optimization
-    parser.add_argument('-dlr', '--decoder_lr', default=3e-4, type=float, help='learning rate')
-    parser.add_argument('-mbs', '--mini_batch_size', default=1, type=int)
-    parser.add_argument('-ebs', '--eval_batch_size', default=4, type=int)
-    parser.add_argument('--unfreeze_epoch', default=0, type=int)
-    parser.add_argument('--refreeze_epoch', default=10000, type=int)
-    parser.add_argument('--gpu_device', type=str, default='0')
-    parser.add_argument('--grad_step', default=1, type=int)
-
-    parser.add_argument('-h', '--help', action='help', default=argparse.SUPPRESS, help='show this help message and exit')
     args = parser.parse_args()
-    if args.debug:
-        parser.set_defaults(batch_size=1, log_interval=1, eval_interval=5)
-
-    # set ablation defaults
-    elif args.ablation == 'mrloss':
-        parser.set_defaults(loss='margin_rank')
-    args = parser.parse_args()
-    print(args)
+    for k, v in sorted(vars(args).items()):
+        print(k, '=', v)
 
     # find relations between question entities and answer entities
     find_relational_paths(args.cpnet_vocab_path, args.cpnet_graph_path, args.train_concepts, args.train_rel_paths, args.nprocs, args.use_cache)
@@ -123,7 +62,7 @@ def main():
 
 
 def train(args):
-    print(args)
+    # print(args)
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -148,22 +87,28 @@ def train(args):
         use_contextualized, cp_emb = True, None
     else:
         use_contextualized = False
+
+    # load concept entity embeddings
     cp_emb = [np.load(path) for path in args.ent_emb_paths]
     cp_emb = torch.tensor(np.concatenate(cp_emb, 1))
-
     concept_num, concept_dim = cp_emb.size(0), cp_emb.size(1)
 
+    # load concrpt relation embeddings
     rel_emb = np.load(args.rel_emb_path)
     rel_emb = np.concatenate((rel_emb, -rel_emb), 0)
     rel_emb = cal_2hop_rel_emb(rel_emb)
     rel_emb = torch.tensor(rel_emb)
     relation_num, relation_dim = rel_emb.size(0), rel_emb.size(1)
-    # print('| num_concepts: {} | num_relations: {} |'.format(concept_num, relation_num))
+    print('| num_concepts: {} | num_relations: {} |'.format(concept_num, relation_num))
 
     device = torch.device('cuda:{}'.format(args.gpu_device) if torch.cuda.is_available() else 'cpu')
 
+    # load path embeddings generated by gpt
     path_embedding_path = os.path.join('./path_embeddings/', args.dataset, 'path_embedding.pickle')
-    dataset = LMRelationNetDataLoader(path_embedding_path, args.train_statements, args.train_rel_paths,
+
+    # initialize dataloader
+    dataset = LMRelationNetDataLoader(args, path_embedding_path,
+                                      args.train_statements, args.train_rel_paths,
                                       args.dev_statements, args.dev_rel_paths,
                                       args.test_statements, args.test_rel_paths,
                                       batch_size=args.batch_size, eval_batch_size=args.eval_batch_size, device=device,

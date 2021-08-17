@@ -1,10 +1,3 @@
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import numpy as np
-from transformers import (OPENAI_GPT_PRETRAINED_CONFIG_ARCHIVE_MAP, BERT_PRETRAINED_CONFIG_ARCHIVE_MAP,
-                          XLNET_PRETRAINED_CONFIG_ARCHIVE_MAP, ROBERTA_PRETRAINED_CONFIG_ARCHIVE_MAP)
-from transformers import AutoModel, AutoConfig
 from transformers import *
 from utils.layers import *
 from utils.data_utils import get_gpt_token_num

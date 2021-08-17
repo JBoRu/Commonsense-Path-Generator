@@ -9,7 +9,6 @@ from utils.tokenization_utils import *
 
 GPT_SPECIAL_TOKENS = ['_start_', '_delimiter_', '_classify_']
 
-
 class BatchGenerator(object):
     def __init__(self, device, batch_size, indexes, qids, labels, tensors=[], lists=[]):
         self.device = device
@@ -510,7 +509,7 @@ def get_gpt_token_num():
     return len(tokenizer)
 
 
-def load_bert_xlnet_roberta_input_tensors(statement_jsonl_path, model_type, model_name, max_seq_length):
+def load_bert_xlnet_roberta_input_tensors(args, statement_jsonl_path, model_type, model_name, max_seq_length):
     class InputExample(object):
 
         def __init__(self, example_id, question, contexts, endings, label=None):
@@ -530,8 +529,11 @@ def load_bert_xlnet_roberta_input_tensors(statement_jsonl_path, model_type, mode
                     'input_mask': input_mask,
                     'segment_ids': segment_ids,
                     'output_mask': output_mask,
+                    'block_flag': block_flag,
+                    'mlm_mask': mlm_mask,
+                    'mlm_label': mlm_label,
                 }
-                for _, input_ids, input_mask, segment_ids, output_mask in choices_features
+                for _, input_ids, input_mask, segment_ids, output_mask, block_flag, mlm_mask, mlm_label in choices_features
             ]
             self.label = label
 
@@ -564,6 +566,7 @@ def load_bert_xlnet_roberta_input_tensors(statement_jsonl_path, model_type, mode
                                      sequence_a_segment_id=0,
                                      sequence_b_segment_id=1,
                                      sep_token_extra=False,
+                                     mask_token='[MASK]',
                                      pad_token_segment_id=0,
                                      pad_on_left=False,
                                      pad_token=0,
@@ -578,13 +581,29 @@ def load_bert_xlnet_roberta_input_tensors(statement_jsonl_path, model_type, mode
 
         features = []
         for ex_index, example in enumerate(examples):
+            label = label_map[example.label]
             choices_features = []
             # for one sample
             for ending_idx, (context, ending) in enumerate(zip(example.contexts, example.endings)):
-                tokens_a = tokenizer.tokenize(context)
-                tokens_b = tokenizer.tokenize(example.question + " " + ending)
+                # experiment with p-tuning format!
+                if args.input_format == 'p-tuning':
+                    kg_prefix = "According to: "
+                    kg = mask_token
+                    context = ". Question: " + context # context is question
+                    ending = " Is it " + ending + "?" # ending is choice
+                    masked = " " + mask_token + ", it is!"
+                    sen_a = kg_prefix + kg + context + ending + masked
 
-                special_tokens_count = 4 if sep_token_extra else 3
+                    tokens_a = tokenizer.tokenize(sen_a)
+                    # print("Debug: sentence a is ", sen_a)
+                    # print("Debug: tokenized sentence a is ", tokens_a)
+                    tokens_b = []
+                elif args.input_format == 'path-gen':
+                    tokens_a = tokenizer.tokenize(context)
+                    tokens_b = tokenizer.tokenize(example.question + " " + ending)
+
+                # for roberta, it will be format of <s> X </s> or <s> A </s></s> B </s>
+                special_tokens_count = 4 if (sep_token_extra and bool(tokens_b)) else 3
                 _truncate_seq_pair(tokens_a, tokens_b, max_seq_length - special_tokens_count)
 
                 # The convention in BERT is:
@@ -606,7 +625,7 @@ def load_bert_xlnet_roberta_input_tensors(statement_jsonl_path, model_type, mode
                 # used as as the "sentence vector". Note that this only makes sense because
                 # the entire model is fine-tuned.
                 tokens = tokens_a + [sep_token]
-                if sep_token_extra:
+                if sep_token_extra and bool(tokens_b):
                     # roberta uses an extra separator b/w pairs of sentences
                     tokens += [sep_token]
 
@@ -622,15 +641,26 @@ def load_bert_xlnet_roberta_input_tensors(statement_jsonl_path, model_type, mode
                 else:
                     tokens = [cls_token] + tokens
                     segment_ids = [cls_token_segment_id] + segment_ids
+                # till now, tokens become <cls> context </s>
+                # print("Debug: tokenized context is ", tokens)
+                # print("Debug: respective segment ids is ", segment_ids)
 
+                # convert to ids
                 input_ids = tokenizer.convert_tokens_to_ids(tokens)
 
-                # The mask has 1 for real tokens and 0 for padding tokens. Only real
-                # tokens are attended to.
-
+                # The mask has 1 for real tokens and 0 for padding tokens. Only real tokens are attended to.
                 input_mask = [1 if mask_padding_with_zero else 0] * len(input_ids)
                 special_token_id = tokenizer.convert_tokens_to_ids([cls_token, sep_token])
                 output_mask = [1 if id in special_token_id else 0 for id in input_ids]  # 1 for mask
+
+                # get the mask position, the first is used for insert prompt, the second is used for prediction
+                mask_token_id = tokenizer.convert_tokens_to_ids([mask_token])
+                mask_token_index = [index for index, id in enumerate(input_ids) if id in mask_token_id]
+                assert len(mask_token_index) == 2, "More than tow masked position in one example"
+                block_flag = [0]*len(input_ids)
+                block_flag[mask_token_index[0]] = 1 # 1 for prompt placeholder
+                mlm_mask = [0]*len(input_ids)
+                mlm_mask[mask_token_index[1]] = 1 # 1 for masked token
 
                 # Zero-pad up to the sequence length.
                 padding_length = max_seq_length - len(input_ids)
@@ -645,13 +675,18 @@ def load_bert_xlnet_roberta_input_tensors(statement_jsonl_path, model_type, mode
                     input_mask = input_mask + ([0 if mask_padding_with_zero else 1] * padding_length)
                     output_mask = output_mask + ([1] * padding_length)
                     segment_ids = segment_ids + ([pad_token_segment_id] * padding_length)
+                    block_flag = block_flag + ([0] * padding_length)
+                    mlm_mask = mlm_mask + ([0] * padding_length)
+
 
                 assert len(input_ids) == max_seq_length
                 assert len(output_mask) == max_seq_length
                 assert len(input_mask) == max_seq_length
                 assert len(segment_ids) == max_seq_length
-                choices_features.append((tokens, input_ids, input_mask, segment_ids, output_mask))
-            label = label_map[example.label]
+                assert len(block_flag) == max_seq_length
+                assert len(mlm_mask) == max_seq_length
+                mlm_label = 1 if ending_idx == label else 0
+                choices_features.append((tokens, input_ids, input_mask, segment_ids, output_mask, block_flag, mlm_mask, mlm_label))
             features.append(InputFeatures(example_id=example.example_id, choices_features=choices_features, label=label))
 
         return features
@@ -676,12 +711,18 @@ def load_bert_xlnet_roberta_input_tensors(statement_jsonl_path, model_type, mode
         return [[choice[field] for choice in feature.choices_features] for feature in features]
 
     def convert_features_to_tensors(features):
+        # (bs, 5, max_len)
         all_input_ids = torch.tensor(select_field(features, 'input_ids'), dtype=torch.long)
         all_input_mask = torch.tensor(select_field(features, 'input_mask'), dtype=torch.long)
         all_segment_ids = torch.tensor(select_field(features, 'segment_ids'), dtype=torch.long)
         all_output_mask = torch.tensor(select_field(features, 'output_mask'), dtype=torch.uint8)
+        all_block_flag = torch.tensor(select_field(features, 'block_flag'), dtype=torch.long)
+        all_mlm_mask = torch.tensor(select_field(features, 'mlm_mask'), dtype=torch.long)
+        # (bs, 5)
+        all_mlm_label = torch.tensor(select_field(features, 'mlm_label'), dtype=torch.long)
+        # (bs)
         all_label = torch.tensor([f.label for f in features], dtype=torch.long)
-        return all_input_ids, all_input_mask, all_segment_ids, all_output_mask, all_label
+        return all_input_ids, all_input_mask, all_segment_ids, all_output_mask, all_label, (all_block_flag, all_mlm_mask, all_mlm_label)
 
     tokenizer_class = {'bert': BertTokenizer, 'xlnet': XLNetTokenizer, 'roberta': RobertaTokenizer, 'albert': AlbertTokenizer}.get(model_type)
     tokenizer = tokenizer_class.from_pretrained(model_name, cache_dir='../cache/')
@@ -691,13 +732,15 @@ def load_bert_xlnet_roberta_input_tensors(statement_jsonl_path, model_type, mode
                                             cls_token=tokenizer.cls_token,
                                             sep_token=tokenizer.sep_token,
                                             sep_token_extra=bool(model_type in ['roberta', 'albert']),
+                                            mask_token=tokenizer.mask_token,
                                             cls_token_segment_id=2 if model_type in ['xlnet'] else 0,
                                             pad_on_left=bool(model_type in ['xlnet']),  # pad on the left for xlnet
                                             pad_token_segment_id=4 if model_type in ['xlnet'] else 0,
                                             sequence_b_segment_id=0 if model_type in ['roberta', 'albert'] else 1)
     example_ids = [f.example_id for f in features]
-    *data_tensors, all_label = convert_features_to_tensors(features)
-    return (example_ids, all_label, *data_tensors)
+    *data_tensors, all_label, prompt_data_tensors = convert_features_to_tensors(features)
+    assert len(prompt_data_tensors) == 3, "Prompt data tensor error"
+    return (example_ids, all_label, *data_tensors, prompt_data_tensors)
 
 
 def load_lstm_input_tensors(input_jsonl_path, max_seq_length):
@@ -730,13 +773,13 @@ def load_lstm_input_tensors(input_jsonl_path, max_seq_length):
     return qids, labels, input_ids, input_lengths
 
 
-def load_input_tensors(input_jsonl_path, model_type, model_name, max_seq_length):
+def load_input_tensors(args, input_jsonl_path, model_type, model_name, max_seq_length):
     if model_type in ('lstm',):
         return load_lstm_input_tensors(input_jsonl_path, max_seq_length)
     elif model_type in ('gpt',):
         return load_gpt_input_tensors(input_jsonl_path, max_seq_length)
     elif model_type in ('bert', 'xlnet', 'roberta', 'albert'):
-        return load_bert_xlnet_roberta_input_tensors(input_jsonl_path, model_type, model_name, max_seq_length)
+        return load_bert_xlnet_roberta_input_tensors(args, input_jsonl_path, model_type, model_name, max_seq_length)
 
 
 def load_info(statement_path: str):

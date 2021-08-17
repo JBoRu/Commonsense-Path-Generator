@@ -1,22 +1,16 @@
 #!/bin/bash
 
-source $1 
-
-save_dir="./saved_models/${dataset}/${encoder}_elr${encoder_lr}_dlr${decoder_lr}_d${dropoutm}_b${batch_size}_s${seed}"
-mkdir -p ${save_dir}
-
-nohup python -u main.py \
-	--dataset $dataset \
-	--inhouse $inhouse \
-	--save_dir $save_dir \
-	--encoder $encoder \
-	--max_seq_len $max_seq_len \
-	--encoder_lr $encoder_lr \
-	--decoder_lr $decoder_lr \
-	--batch_size $batch_size \
-	--dropoutm $dropoutm \
-	--gpu_device $gpu_device \
+python -u main.py \
+	--dataset "csqa" \
+	--inhouse 1 \
+	--save_dir "./saved_models/csqa/" \
+	--encoder 'roberta-large' \
+	--max_seq_len 80 \
+	--encoder_lr 2e-6 \
+	--decoder_lr 1e-3 \
+	--batch_size 16 \
+	--dropoutm 0.1 \
+	--gpu_device 7 \
 	--nprocs 20 \
-	--save_model $save_model \
-	--seed $seed \
-	> ${save_dir}/train.log 2>&1 &
+	--save_model 0 \
+	--seed 42 \
