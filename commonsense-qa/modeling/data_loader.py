@@ -21,13 +21,13 @@ class LMRelationNetDataLoader(object):
 
         model_type = MODEL_NAME_TO_CLASS[model_name]
 
-        # 1-1-5
+        # (num_example), (num_example, 5, max_seq_lem), (num_example, 5)
         self.train_qids, self.train_labels, *self.train_data, self.prompt_train_data = load_input_tensors(self.args, train_statement_path, model_type, model_name, max_seq_length)
         self.dev_qids, self.dev_labels, *self.dev_data, self.prompt_dev_data = load_input_tensors(self.args, dev_statement_path, model_type, model_name, max_seq_length)
 
         num_choice = self.train_data[0].size(1)
 
-        # 5
+        # (num_samples, 5, 5, hid_dim)
         with open(path_embedding_path, 'rb') as handle:
             path_embedding = pickle.load(handle)
         self.train_data += [path_embedding['train']]
@@ -85,19 +85,19 @@ class LMRelationNetDataLoader(object):
             train_indexes = self.inhouse_train_indexes[torch.randperm(n_train)]
         else:
             train_indexes = torch.randperm(len(self.train_qids))
-        return BatchGenerator(self.device, self.batch_size, train_indexes, self.train_qids, self.train_labels, tensors=self.train_data)
+        return BatchGenerator(self.device, self.batch_size, train_indexes, self.train_qids, self.train_labels, tensors=self.train_data, prompt_data=self.prompt_train_data)
 
     def train_eval(self):
-        return BatchGenerator(self.device, self.eval_batch_size, torch.arange(len(self.train_qids)), self.train_qids, self.train_labels, tensors=self.train_data)
+        return BatchGenerator(self.device, self.eval_batch_size, torch.arange(len(self.train_qids)), self.train_qids, self.train_labels, tensors=self.train_data, prompt_data=self.prompt_train_data)
 
     def dev(self):
-        return BatchGenerator(self.device, self.eval_batch_size, torch.arange(len(self.dev_qids)), self.dev_qids, self.dev_labels, tensors=self.dev_data)
+        return BatchGenerator(self.device, self.eval_batch_size, torch.arange(len(self.dev_qids)), self.dev_qids, self.dev_labels, tensors=self.dev_data, prompt_data=self.prompt_dev_data)
 
     def test(self):
         if self.is_inhouse:
-            return BatchGenerator(self.device, self.eval_batch_size, self.inhouse_test_indexes, self.train_qids, self.train_labels, tensors=self.train_data)
+            return BatchGenerator(self.device, self.eval_batch_size, self.inhouse_test_indexes, self.train_qids, self.train_labels, tensors=self.train_data, prompt_data=self.prompt_train_data)
         else:
-            return BatchGenerator(self.device, self.eval_batch_size, torch.arange(len(self.test_qids)), self.test_qids, self.test_labels, tensors=self.test_data)
+            return BatchGenerator(self.device, self.eval_batch_size, torch.arange(len(self.test_qids)), self.test_qids, self.test_labels, tensors=self.test_data, prompt_data=self.prompt_test_data)
 
 class LMRelationNetDataLoaderForPred(object):
 

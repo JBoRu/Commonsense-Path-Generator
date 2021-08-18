@@ -1,6 +1,6 @@
 import pickle
 
-import dgl
+# import dgl
 import numpy as np
 import torch
 from transformers import (OpenAIGPTTokenizer, BertTokenizer, XLNetTokenizer, RobertaTokenizer, AlbertTokenizer)
@@ -10,7 +10,7 @@ from utils.tokenization_utils import *
 GPT_SPECIAL_TOKENS = ['_start_', '_delimiter_', '_classify_']
 
 class BatchGenerator(object):
-    def __init__(self, device, batch_size, indexes, qids, labels, tensors=[], lists=[]):
+    def __init__(self, device, batch_size, indexes, qids, labels, tensors=[], lists=[], prompt_data=[]):
         self.device = device
         self.batch_size = batch_size
         self.indexes = indexes
@@ -18,6 +18,7 @@ class BatchGenerator(object):
         self.labels = labels
         self.tensors = tensors
         self.lists = lists
+        self.prompt_data = prompt_data
 
     def __len__(self):
         return (self.indexes.size(0) - 1) // self.batch_size + 1
@@ -32,7 +33,8 @@ class BatchGenerator(object):
             batch_labels = self._to_device(self.labels[batch_indexes])
             batch_tensors = [self._to_device(x[batch_indexes]) for x in self.tensors]
             batch_lists = [self._to_device([x[i] for i in batch_indexes]) for x in self.lists]
-            yield tuple([batch_qids, batch_labels, *batch_tensors, *batch_lists])
+            batch_prompt = [self._to_device(x[batch_indexes]) for x in self.prompt_data]
+            yield tuple([batch_qids, batch_labels, *batch_tensors, *batch_lists, batch_prompt])
 
     def _to_device(self, obj):
         if isinstance(obj, (tuple, list)):
@@ -571,12 +573,12 @@ def load_bert_xlnet_roberta_input_tensors(args, statement_jsonl_path, model_type
                                      pad_on_left=False,
                                      pad_token=0,
                                      mask_padding_with_zero=True):
-        """ Loads a data file into a list of `InputBatch`s
+        ''' Loads a data file into a list of `InputBatch`s
             `cls_token_at_end` define the location of the CLS token:
                 - False (Default, BERT/XLM pattern): [CLS] + A + [SEP] + B + [SEP]
                 - True (XLNet/GPT pattern): A + [SEP] + B + [SEP] + [CLS]
-            `cls_token_segment_id` define the segment id associated to the CLS token (0 for BERT, 2 for XLNet)
-        """
+            `cls_token_segment_id` define the segment id associated to the CLS token (0 for BERT, 2 for XLNet) '''
+        # {0:0, 1:1, 2:2, 3:3, 4:4}
         label_map = {label: i for i, label in enumerate(label_list)}
 
         features = []
@@ -588,7 +590,7 @@ def load_bert_xlnet_roberta_input_tensors(args, statement_jsonl_path, model_type
                 # experiment with p-tuning format!
                 if args.input_format == 'p-tuning':
                     kg_prefix = "According to: "
-                    kg = mask_token
+                    kg = mask_token + " " + mask_token
                     context = ". Question: " + context # context is question
                     ending = " Is it " + ending + "?" # ending is choice
                     masked = " " + mask_token + ", it is!"
@@ -601,6 +603,16 @@ def load_bert_xlnet_roberta_input_tensors(args, statement_jsonl_path, model_type
                 elif args.input_format == 'path-gen':
                     tokens_a = tokenizer.tokenize(context)
                     tokens_b = tokenizer.tokenize(example.question + " " + ending)
+                elif args.input_format == 'hard-prompt':
+                    context = "Question: " + context  # context is question
+                    ending = " Is it " + ending + "?"  # ending is choice
+                    masked = " " + mask_token + ", it is!"
+                    sen_a = context + ending + masked
+
+                    tokens_a = tokenizer.tokenize(sen_a)
+                    # print("Debug: sentence a is ", sen_a)
+                    # print("Debug: tokenized sentence a is ", tokens_a)
+                    tokens_b = []
 
                 # for roberta, it will be format of <s> X </s> or <s> A </s></s> B </s>
                 special_tokens_count = 4 if (sep_token_extra and bool(tokens_b)) else 3
@@ -656,11 +668,16 @@ def load_bert_xlnet_roberta_input_tensors(args, statement_jsonl_path, model_type
                 # get the mask position, the first is used for insert prompt, the second is used for prediction
                 mask_token_id = tokenizer.convert_tokens_to_ids([mask_token])
                 mask_token_index = [index for index, id in enumerate(input_ids) if id in mask_token_id]
-                assert len(mask_token_index) == 2, "More than tow masked position in one example"
+                # assert len(mask_token_index) == 3, "More than three masked position in one example"
                 block_flag = [0]*len(input_ids)
-                block_flag[mask_token_index[0]] = 1 # 1 for prompt placeholder
                 mlm_mask = [0]*len(input_ids)
-                mlm_mask[mask_token_index[1]] = 1 # 1 for masked token
+                if args.input_format == 'p-tuning':
+                    block_flag[mask_token_index[0]] = 1  # 1 for prompt placeholder
+                    block_flag[mask_token_index[1]] = 1
+                    mlm_mask[mask_token_index[2]] = 1 # 1 for masked token
+                elif args.input_format == 'hard-prompt':
+                    mlm_mask[mask_token_index[0]] = 1  # 1 for masked token
+
 
                 # Zero-pad up to the sequence length.
                 padding_length = max_seq_length - len(input_ids)

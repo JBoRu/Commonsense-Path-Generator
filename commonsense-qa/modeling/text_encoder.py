@@ -13,6 +13,23 @@ MODEL_CLASS_TO_NAME = {
 
 MODEL_NAME_TO_CLASS = {model_name: model_class for model_class, model_name_list in MODEL_CLASS_TO_NAME.items() for model_name in model_name_list}
 
+MODEL_CLASSES_PROMPT = {
+    'bert': {
+        'config': BertConfig,
+        'tokenizer': BertTokenizer,
+        'model': BertForMaskedLM
+    },
+    'roberta': {
+        'config': RobertaConfig,
+        'tokenizer': RobertaTokenizer,
+        'model': RobertaForMaskedLM
+    },
+    'albert': {
+        'config': AlbertConfig,
+        'tokenizer': AlbertTokenizer,
+        'model': AlbertForMaskedLM
+    }
+}
 
 class LSTMTextEncoder(nn.Module):
     pool_layer_classes = {'mean': MeanPoolLayer, 'max': MaxPoolLayer}
@@ -81,8 +98,8 @@ class TextEncoder(nn.Module):
             self.module = LSTMTextEncoder(**kwargs, output_hidden_states=True)
             self.sent_dim = self.module.output_size
         else:
-            module_config = AutoConfig.from_pretrained(model_name, output_hidden_states=True, cache_dir='../cache/')
-            self.module = AutoModel.from_pretrained(model_name, config=module_config, cache_dir='../cache/')
+            module_config = AutoConfig.from_pretrained(model_name, output_hidden_states=True, cache_dir='/mnt/nlp_model/huggingface')
+            self.module = AutoModel.from_pretrained(model_name, config=module_config, cache_dir='/mnt/nlp_model/huggingface')
             if not from_checkpoint == 'None':
                 # self.module = self.module.from_pretrained(from_checkpoint, config=module_config, cache_dir='../cache/')
                 weight = torch.load(from_checkpoint, map_location='cpu')
@@ -99,6 +116,7 @@ class TextEncoder(nn.Module):
 
             if self.model_type in ('gpt',):
                 self.module.resize_token_embeddings(get_gpt_token_num())
+
             self.sent_dim = self.module.config.n_embd if self.model_type in ('gpt',) else self.module.config.hidden_size
         print(self.model_type)
 
@@ -132,3 +150,108 @@ class TextEncoder(nn.Module):
                 return hidden_states, output_mask
             sent_vecs = hidden_states[:, 0]
         return sent_vecs, all_hidden_states
+
+class PromptTextEncoder(nn.Module):
+    valid_model_types = set(MODEL_CLASS_TO_NAME.keys())
+
+    def __init__(self, model_name, label_list_len, from_checkpoint=None):
+        super().__init__()
+        self.model_type = MODEL_NAME_TO_CLASS[model_name]
+        self.model_dict = MODEL_CLASSES_PROMPT[self.model_type]
+        # self.output_token_states = output_token_states
+        # assert not self.output_token_states or self.model_type in ('bert', 'roberta', 'albert')
+
+        # if self.model_type in ('lstm',):
+        #     self.module = LSTMTextEncoder(**kwargs, output_hidden_states=True)
+        #     self.sent_dim = self.module.output_size
+        # else:
+
+        # module_config = AutoConfig.from_pretrained(model_name, output_hidden_states=True, cache_dir='/mnt/nlp_model/huggingface')
+        # self.module = AutoModel.from_pretrained(model_name, config=module_config, cache_dir='/mnt/nlp_model/huggingface')
+        print("Loading plm config....")
+        config_class = self.model_dict['config']
+        model_config = config_class.from_pretrained(
+            # model_name,
+            "/mnt/nlp_model/huggingface/roberta-large/config.json",
+            num_labels=label_list_len,
+            # cache_dir="./mnt/nlp_data/huggingface/"
+        )
+
+        print("Loading plm tokenizer....")
+        tokenizer_class = self.model_dict['tokenizer']
+        self.tokenizer = tokenizer_class.from_pretrained(
+            '/mnt/nlp_model/huggingface/roberta-large/',
+            # cache_dir="/mnt/nlp_model/huggingface/roberta-large/"
+        )
+
+        print("Loading plm model....")
+        model_class = self.model_dict['model']
+        self.module = model_class.from_pretrained(
+            # model_name,
+            "/mnt/nlp_model/huggingface/roberta-large/pytorch_model.bin",
+            config=model_config,
+            # cache_dir="./mnt/nlp_data/huggingface"
+        )
+
+        if not from_checkpoint == 'None':
+            # self.module = self.module.from_pretrained(from_checkpoint, config=module_config, cache_dir='../cache/')
+            weight = torch.load(from_checkpoint, map_location='cpu')
+            new_dict = {}
+            for k, v in weight.items():
+                nk = k.replace('_transformer_model.', '')
+                if nk not in self.module.state_dict():
+                    print(k)
+                    continue
+                new_dict[nk] = v
+            model_dict = self.module.state_dict()
+            model_dict.update(new_dict)
+            self.module.load_state_dict(model_dict)
+
+        if self.model_type in ('gpt',):
+            self.module.resize_token_embeddings(get_gpt_token_num())
+
+        self.sent_dim = self.module.config.n_embd if self.model_type in ('gpt',) else self.module.config.hidden_size
+
+        print(self.model_type)
+
+    def forward(self, input_ids=None, inputs_embeds=None, attention_mask=None, token_type_ids=None, labels=None):
+        if input_ids is not None:
+            return self.module(input_ids=input_ids,
+                               attention_mask=attention_mask,
+                               token_type_ids=token_type_ids)
+        else:
+            return self.module(inputs_embeds=inputs_embeds,
+                              attention_mask=attention_mask,
+                              token_type_ids=token_type_ids)
+
+    # def forward(self, *inputs, layer_id=-1):
+    #     '''
+    #     layer_id: only works for non-LSTM encoders
+    #     output_token_states: if True, return hidden states of specific layer and attention masks
+    #     '''
+    #
+    #     if self.model_type in ('lstm',):  # lstm
+    #         input_ids, lengths = inputs
+    #         outputs = self.module(input_ids, lengths)
+    #     elif self.model_type in ('gpt',):  # gpt
+    #         input_ids, cls_token_ids, lm_labels = inputs  # lm_labels is not used
+    #         outputs = self.module(input_ids)
+    #     else:  # bert / xlnet / roberta
+    #         input_ids, attention_mask, token_type_ids, output_mask = inputs
+    #         outputs = self.module(input_ids, token_type_ids=token_type_ids, attention_mask=attention_mask)
+    #     all_hidden_states = outputs[-1]
+    #     hidden_states = all_hidden_states[layer_id]
+    #
+    #     if self.model_type in ('lstm',):
+    #         sent_vecs = outputs[1]
+    #     elif self.model_type in ('gpt',):
+    #         cls_token_ids = cls_token_ids.view(-1).unsqueeze(-1).unsqueeze(-1).expand(-1, 1, hidden_states.size(-1))
+    #         sent_vecs = hidden_states.gather(1, cls_token_ids).squeeze(1)
+    #     elif self.model_type in ('xlnet',):
+    #         sent_vecs = hidden_states[:, -1]
+    #     else:
+    #         if self.output_token_states:
+    #             return hidden_states, output_mask
+    #         sent_vecs = hidden_states[:, 0]
+    #     return sent_vecs, all_hidden_states
+    #

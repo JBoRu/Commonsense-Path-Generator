@@ -82,6 +82,7 @@ def add_data_arguments(parser):
 
 def add_encoder_arguments(parser):
     parser.add_argument('-enc', '--encoder', default='bert-large-uncased', help='encoder type')
+    parser.add_argument('--encoder_name', default='roberta', help='encoder name')
     parser.add_argument('--encoder_layer', default=-1, type=int, help='encoder layer ID to use as features (used only by non-LSTM encoders)')
     parser.add_argument('-elr', '--encoder_lr', default=2e-5, type=float, help='learning rate')
     # used only for LSTM encoder
@@ -104,11 +105,11 @@ def add_optimization_arguments(parser):
     parser.add_argument('--lr_schedule', default='fixed', choices=['fixed', 'warmup_linear', 'warmup_constant'], help='learning rate scheduler')
     parser.add_argument('-bs', '--batch_size', default=32, type=int)
     parser.add_argument('--warmup_steps', type=float, default=150)
+    parser.add_argument('--max_steps', type=int)
     parser.add_argument('--max_grad_norm', default=1.0, type=float, help='max grad norm (0 to disable)')
     parser.add_argument('--weight_decay', default=1e-2, type=float, help='l2 weight decay strength')
     parser.add_argument('--n_epochs', default=100, type=int, help='total number of training epochs to perform.')
     parser.add_argument('-me', '--max_epochs_before_stop', default=2, type=int, help='stop training if dev does not increase for N epochs')
-    parser.add_argument('--max_steps', type=int)
 
 
 def add_additional_arguments(parser):
@@ -165,10 +166,11 @@ def get_parser():
 
     # model architecture
     parser.add_argument('--input_format', default="path-gen", type=str, help='input pattern template')
+    parser.add_argument('--prompt_token_num', default=2, type=int, help='the number of soft prompt token')
     parser.add_argument('--ablation', default='att_pool',
                         choices=['None', 'no_kg', 'no_2hop', 'no_1hop', 'no_qa', 'no_rel',
                                  'mrloss', 'fixrel', 'fakerel', 'no_factor_mul', 'no_2hop_qa',
-                                 'randomrel', 'encode_qas', 'multihead_pool', 'att_pool'], nargs='?', const=None,
+                                 'randomrel', 'encode_qas', 'multihead_pool', 'att_pool','no_dynamic_kg', 'no_prompt'], nargs='?', const=None,
                         help='run ablation test')
     parser.add_argument('--att_head_num', default=2, type=int, help='number of attention heads')
     parser.add_argument('--mlp_dim', default=128, type=int, help='number of MLP hidden units')
@@ -188,7 +190,7 @@ def get_parser():
     parser.add_argument('-dlr', '--decoder_lr', default=3e-4, type=float, help='learning rate')
     parser.add_argument('-mbs', '--mini_batch_size', default=1, type=int)
     parser.add_argument('-ebs', '--eval_batch_size', default=4, type=int)
-    parser.add_argument('--unfreeze_epoch', default=0, type=int)
+    parser.add_argument('--unfreeze_epoch', default=-1, type=int)
     parser.add_argument('--refreeze_epoch', default=10000, type=int)
     parser.add_argument('--gpu_device', type=str, default='0')
     parser.add_argument('--grad_step', default=1, type=int)

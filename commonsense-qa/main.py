@@ -3,6 +3,7 @@ import random
 from transformers import *
 
 from modeling.kg_encoder import *
+from modeling.models import LMRelationNet, PromptLMRelationNet
 from modeling.data_loader import *
 from utils.optimization_utils import OPTIMIZER_CLASSES
 from utils.parser_utils import *
@@ -23,8 +24,21 @@ def evaluate_accuracy(eval_set, model):
     n_samples, n_correct = 0, 0
     model.eval()
     with torch.no_grad():
-        for qids, labels, *input_data in eval_set:
+        for qids, labels, *input_data, prompt_data in eval_set:
             logits, _ = model(*input_data)
+            n_correct += (logits.argmax(1) == labels).sum().item()
+            n_samples += labels.size(0)
+    return n_correct / n_samples
+
+def evaluate_accuracy_prompt(eval_set, model):
+    n_samples, n_correct = 0, 0
+    model.eval()
+    with torch.no_grad():
+        for qids, labels, *input_data,  prompt_data in eval_set:
+            # (bs*5, 2)
+            logits, _ = model(*input_data, prompt_data=prompt_data)
+            logits = logits[:, 1:2] # (bs*5) get the logit of YES
+            logits = logits.view(-1, 5) # (bs, 5)
             n_correct += (logits.argmax(1) == labels).sum().item()
             n_samples += labels.size(0)
     return n_correct / n_samples
@@ -107,25 +121,56 @@ def train(args):
     path_embedding_path = os.path.join('./path_embeddings/', args.dataset, 'path_embedding.pickle')
 
     # initialize dataloader
-    dataset = LMRelationNetDataLoader(args, path_embedding_path,
-                                      args.train_statements, args.train_rel_paths,
-                                      args.dev_statements, args.dev_rel_paths,
-                                      args.test_statements, args.test_rel_paths,
-                                      batch_size=args.batch_size, eval_batch_size=args.eval_batch_size, device=device,
-                                      model_name=args.encoder,
-                                      max_tuple_num=args.max_tuple_num, max_seq_length=args.max_seq_len,
-                                      is_inhouse=args.inhouse, inhouse_train_qids_path=args.inhouse_train_qids,
-                                      use_contextualized=use_contextualized,
-                                      train_adj_path=args.train_adj, dev_adj_path=args.dev_adj, test_adj_path=args.test_adj,
-                                      train_node_features_path=args.train_node_features, dev_node_features_path=args.dev_node_features,
-                                      test_node_features_path=args.test_node_features, node_feature_type=args.node_feature_type)
+    if args.input_format in ['p-tuning', 'hard-prompt']:
+        dataset = LMRelationNetDataLoader(args, path_embedding_path,
+                                          args.train_statements, args.train_rel_paths,
+                                          args.dev_statements, args.dev_rel_paths,
+                                          args.test_statements, args.test_rel_paths,
+                                          batch_size=args.batch_size, eval_batch_size=args.eval_batch_size,
+                                          device=device,
+                                          model_name=args.encoder,
+                                          max_tuple_num=args.max_tuple_num, max_seq_length=args.max_seq_len,
+                                          is_inhouse=args.inhouse, inhouse_train_qids_path=args.inhouse_train_qids,
+                                          use_contextualized=use_contextualized,
+                                          train_adj_path=args.train_adj, dev_adj_path=args.dev_adj,
+                                          test_adj_path=args.test_adj,
+                                          train_node_features_path=args.train_node_features,
+                                          dev_node_features_path=args.dev_node_features,
+                                          test_node_features_path=args.test_node_features, node_feature_type=args.node_feature_type)
+    elif args.input_format == 'path-generate':
+        dataset = LMRelationNetDataLoader(args, path_embedding_path,
+                                          args.train_statements, args.train_rel_paths,
+                                          args.dev_statements, args.dev_rel_paths,
+                                          args.test_statements, args.test_rel_paths,
+                                          batch_size=args.batch_size, eval_batch_size=args.eval_batch_size, device=device,
+                                          model_name=args.encoder,
+                                          max_tuple_num=args.max_tuple_num, max_seq_length=args.max_seq_len,
+                                          is_inhouse=args.inhouse, inhouse_train_qids_path=args.inhouse_train_qids,
+                                          use_contextualized=use_contextualized,
+                                          train_adj_path=args.train_adj, dev_adj_path=args.dev_adj, test_adj_path=args.test_adj,
+                                          train_node_features_path=args.train_node_features, dev_node_features_path=args.dev_node_features,
+                                          test_node_features_path=args.test_node_features, node_feature_type=args.node_feature_type)
 
     ###################################################################################################
     #   Build model                                                                                   #
     ###################################################################################################
 
     lstm_config = get_lstm_config_from_args(args)
-    model = LMRelationNet(model_name=args.encoder, from_checkpoint=args.from_checkpoint, concept_num=concept_num, concept_dim=relation_dim,
+    if args.input_format in ['p-tuning', 'hard-prompt']:
+        model = PromptLMRelationNet(args=args, model_name=args.encoder, label_list_len=2, from_checkpoint=args.from_checkpoint,
+                          concept_num=concept_num, concept_dim=relation_dim,
+                          relation_num=relation_num, relation_dim=relation_dim,
+                          concept_in_dim=(dataset.get_node_feature_dim() if use_contextualized else concept_dim),
+                          hidden_size=args.mlp_dim, num_hidden_layers=args.mlp_layer_num, prompt_token_num=args.prompt_token_num,
+                          fc_size=args.fc_dim, num_fc_layers=args.fc_layer_num, dropout=args.dropoutm,
+                          pretrained_concept_emb=cp_emb, pretrained_relation_emb=rel_emb, freeze_ent_emb=args.freeze_ent_emb,
+                          init_range=args.init_range, ablation=args.ablation, use_contextualized=use_contextualized,
+                          emb_scale=args.emb_scale)
+        unfreeze_net(model.encoder.module)
+        unfreeze_net(model.decoder.rel_emb)
+        unfreeze_net(model.decoder.concept_emb)
+    elif args.input_format == 'path-generate':
+        model = LMRelationNet(model_name=args.encoder, from_checkpoint=args.from_checkpoint, concept_num=concept_num, concept_dim=relation_dim,
                           relation_num=relation_num, relation_dim=relation_dim,
                           concept_in_dim=(dataset.get_node_feature_dim() if use_contextualized else concept_dim),
                           hidden_size=args.mlp_dim, num_hidden_layers=args.mlp_layer_num, num_attention_heads=args.att_head_num,
@@ -144,14 +189,37 @@ def train(args):
         return
 
     no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
-    grouped_parameters = [
-        {'params': [p for n, p in model.encoder.named_parameters() if not any(nd in n for nd in no_decay)], 'weight_decay': args.weight_decay, 'lr': args.encoder_lr},
-        {'params': [p for n, p in model.encoder.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0, 'lr': args.encoder_lr},
-        {'params': [p for n, p in model.decoder.named_parameters() if not any(nd in n for nd in no_decay)], 'weight_decay': args.weight_decay, 'lr': args.decoder_lr},
-        {'params': [p for n, p in model.decoder.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0, 'lr': args.decoder_lr},
-    ]
-    optimizer = OPTIMIZER_CLASSES[args.optim](grouped_parameters)
+    if args.input_format == "p-tuning":
+        grouped_parameters = [
+            {'params': [p for n, p in model.encoder.named_parameters() if not any(nd in n for nd in no_decay)],
+             'weight_decay': args.weight_decay, 'lr': args.encoder_lr},
+            {'params': [p for n, p in model.encoder.named_parameters() if any(nd in n for nd in no_decay)],
+             'weight_decay': 0.0, 'lr': args.encoder_lr},
+            {'params': [p for n, p in model.decoder.named_parameters() if not any(nd in n for nd in no_decay)],
+             'weight_decay': args.weight_decay, 'lr': args.decoder_lr},
+            {'params': [p for n, p in model.decoder.named_parameters() if any(nd in n for nd in no_decay)],
+             'weight_decay': 0.0, 'lr': args.decoder_lr},
+        ]
+    elif args.input_format == "hard-prompt":
+        grouped_parameters = [
+            {'params': [p for n, p in model.encoder.named_parameters() if not any(nd in n for nd in no_decay)],
+             'weight_decay': args.weight_decay, 'lr': args.encoder_lr},
+            {'params': [p for n, p in model.encoder.named_parameters() if any(nd in n for nd in no_decay)],
+             'weight_decay': 0.0, 'lr': args.encoder_lr},
+            {'params': [p for n, p in model.decoder.named_parameters() if not any(nd in n for nd in no_decay)],
+             'weight_decay': args.weight_decay, 'lr': args.decoder_lr},
+            {'params': [p for n, p in model.decoder.named_parameters() if any(nd in n for nd in no_decay)],
+             'weight_decay': 0.0, 'lr': args.decoder_lr},
+        ]
+    elif args.input_format == "path-generate":
+        grouped_parameters = [
+            {'params': [p for n, p in model.encoder.named_parameters() if not any(nd in n for nd in no_decay)], 'weight_decay': args.weight_decay, 'lr': args.encoder_lr},
+            {'params': [p for n, p in model.encoder.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0, 'lr': args.encoder_lr},
+            {'params': [p for n, p in model.decoder.named_parameters() if not any(nd in n for nd in no_decay)], 'weight_decay': args.weight_decay, 'lr': args.decoder_lr},
+            {'params': [p for n, p in model.decoder.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0, 'lr': args.decoder_lr},
+        ]
 
+    optimizer = OPTIMIZER_CLASSES[args.optim](grouped_parameters)
     if args.lr_schedule == 'fixed':
         scheduler = get_constant_schedule(optimizer)
     elif args.lr_schedule == 'warmup_constant':
@@ -159,14 +227,16 @@ def train(args):
     elif args.lr_schedule == 'warmup_linear':
         max_steps = int(args.n_epochs * (dataset.train_size() / args.batch_size))
         scheduler = get_linear_schedule_with_warmup(optimizer, warmup_steps=args.warmup_steps, t_total=max_steps)
+    elif 'warmup' in args.lr_schedule:
+        scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=args.warmup_steps, num_training_steps=args.max_steps)
 
     print('parameters:')
-    for name, param in model.decoder.named_parameters():
+    for name, param in model.named_parameters():
         if param.requires_grad:
             print('\t{:45}\ttrainable\t{}'.format(name, param.size()))
         else:
             print('\t{:45}\tfixed\t{}'.format(name, param.size()))
-    num_params = sum(p.numel() for p in model.decoder.parameters() if p.requires_grad)
+    num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print('\ttotal:', num_params)
 
     if args.loss == 'margin_rank':
@@ -184,7 +254,7 @@ def train(args):
     best_dev_acc, final_test_acc, total_loss = 0.0, 0.0, 0.0
     start_time = time.time()
     model.train()
-    freeze_net(model.encoder)
+    # freeze_net(model.encoder)
     # try:
     rel_grad = []
     linear_grad = []
@@ -196,12 +266,15 @@ def train(args):
             print('encoder refreezed')
             freeze_net(model.encoder)
         model.train()
-        for qids, labels, *input_data in dataset.train():
+        for qids, labels, *input_data, prompt_data in dataset.train():
             optimizer.zero_grad()
             bs = labels.size(0)
             for a in range(0, bs, args.mini_batch_size):
                 b = min(a + args.mini_batch_size, bs)
-                logits, _ = model(*[x[a:b] for x in input_data], layer_id=args.encoder_layer)
+                if args.input_format in ['p-tuning','hard-prompt']:
+                    logits, mlm_labels = model(*[x[a:b] for x in input_data], prompt_data=[x[a:b] for x in prompt_data])
+                elif args.input_format == 'path-generate':
+                    logits, _ = model(*[x[a:b] for x in input_data], layer_id=args.encoder_layer)
 
                 if args.loss == 'margin_rank':
                     num_choice = logits.size(1)
@@ -212,7 +285,11 @@ def train(args):
                     y = wrong_logits.new_ones((wrong_logits.size(0),))
                     loss = loss_func(correct_logits, wrong_logits, y)  # margin ranking loss
                 elif args.loss == 'cross_entropy':
-                    loss = loss_func(logits, labels[a:b])
+                    if args.input_format in ['p-tuning','hard-prompt']:
+                        loss = loss_func(logits, mlm_labels)
+                    elif args.input_format == 'path-generate':
+                        loss = loss_func(logits, labels[a:b])
+
                 loss = loss * (b - a) / bs
                 loss.backward()
                 total_loss += loss.item()
@@ -227,7 +304,7 @@ def train(args):
             if (global_step + 1) % args.log_interval == 0:
                 total_loss /= args.log_interval
                 ms_per_batch = 1000 * (time.time() - start_time) / args.log_interval
-                print('| step {:5} |  lr: {:9.7f} | loss {:7.4f} | ms/batch {:7.2f} |'.format(global_step, scheduler.get_lr()[0], total_loss, ms_per_batch))
+                print('| step {:5} |  kg_enc_lr: {:9.7f} | loss {:7.4f} | ms/batch {:7.2f} |'.format(global_step, scheduler.get_last_lr()[2], total_loss, ms_per_batch))
                 # print('| rel_grad: {:1.2e} | linear_grad: {:1.2e} |'.format(sum(rel_grad) / len(rel_grad), sum(linear_grad) / len(linear_grad)))
                 total_loss = 0
                 rel_grad = []
@@ -236,8 +313,13 @@ def train(args):
             global_step += 1
 
         model.eval()
-        dev_acc = evaluate_accuracy(dataset.dev(), model)
-        test_acc = evaluate_accuracy(dataset.test(), model) if dataset.test_size() > 0 else 0.0
+        if args.input_format in ['p-tuning','hard-prompt']:
+            dev_acc = evaluate_accuracy_prompt(dataset.dev(), model)
+            test_acc = evaluate_accuracy_prompt(dataset.test(), model) if dataset.test_size() > 0 else 0.0
+        elif args.input_format == 'path-generate':
+            dev_acc = evaluate_accuracy(dataset.dev(), model)
+            test_acc = evaluate_accuracy(dataset.test(), model) if dataset.test_size() > 0 else 0.0
+
         print('-' * 71)
         print('| epoch {:5} | dev_acc {:7.4f} | test_acc {:7.4f} |'.format(epoch_id, dev_acc, test_acc))
         print('-' * 71)
@@ -250,12 +332,11 @@ def train(args):
             if args.save_model == 1:
                 torch.save([model, args], model_path)
             print(f'model saved to {model_path}')
+
         model.train()
         start_time = time.time()
         if epoch_id > args.unfreeze_epoch and epoch_id - best_dev_epoch >= args.max_epochs_before_stop:
             break
-    # except (KeyboardInterrupt, RuntimeError) as e:
-    #     print(e)
 
     print()
     print('training ends in {} steps'.format(global_step))
