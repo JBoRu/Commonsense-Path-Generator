@@ -194,6 +194,9 @@ def get_parser():
     parser.add_argument('--refreeze_epoch', default=10000, type=int)
     parser.add_argument('--gpu_device', type=str, default='0')
     parser.add_argument('--grad_step', default=1, type=int)
+    parser.add_argument('--freeze_enc', default=1, type=int)
+    parser.add_argument('--freeze_dec', default=1, type=int)
+
 
     # parser.add_argument('-h', '--help', action='help', default=argparse.SUPPRESS,
     #                     help='show this help message and exit')

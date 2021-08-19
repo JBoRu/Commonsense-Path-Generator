@@ -572,7 +572,8 @@ def load_bert_xlnet_roberta_input_tensors(args, statement_jsonl_path, model_type
                                      pad_token_segment_id=0,
                                      pad_on_left=False,
                                      pad_token=0,
-                                     mask_padding_with_zero=True):
+                                     mask_padding_with_zero=True,
+                                     num_prompt_token=0):
         ''' Loads a data file into a list of `InputBatch`s
             `cls_token_at_end` define the location of the CLS token:
                 - False (Default, BERT/XLM pattern): [CLS] + A + [SEP] + B + [SEP]
@@ -590,7 +591,8 @@ def load_bert_xlnet_roberta_input_tensors(args, statement_jsonl_path, model_type
                 # experiment with p-tuning format!
                 if args.input_format == 'p-tuning':
                     kg_prefix = "According to: "
-                    kg = mask_token + " " + mask_token
+                    kg = [mask_token for i in range(num_prompt_token)]
+                    kg = " ".join(kg)
                     context = ". Question: " + context # context is question
                     ending = " Is it " + ending + "?" # ending is choice
                     masked = " " + mask_token + ", it is!"
@@ -613,29 +615,24 @@ def load_bert_xlnet_roberta_input_tensors(args, statement_jsonl_path, model_type
                     # print("Debug: sentence a is ", sen_a)
                     # print("Debug: tokenized sentence a is ", tokens_a)
                     tokens_b = []
+                elif args.input_format == 'soft-prompt':
+                    context = "Question: " + context  # context is question
+                    ending = " Is it " + ending + "?"  # ending is choice
+                    soft_prompt = [mask_token for i in range(num_prompt_token)]
+                    soft_prompt = " ".join(soft_prompt)
+                    soft_prompt = " " + soft_prompt
+                    masked = " " + mask_token + ", it is!"
+                    sen_a = context + ending + soft_prompt + masked
+
+                    tokens_a = tokenizer.tokenize(sen_a)
+                    # print("Debug: sentence a is ", sen_a)
+                    # print("Debug: tokenized sentence a is ", tokens_a)
+                    tokens_b = []
 
                 # for roberta, it will be format of <s> X </s> or <s> A </s></s> B </s>
                 special_tokens_count = 4 if (sep_token_extra and bool(tokens_b)) else 3
                 _truncate_seq_pair(tokens_a, tokens_b, max_seq_length - special_tokens_count)
 
-                # The convention in BERT is:
-                # (a) For sequence pairs:
-                #  tokens:   [CLS] is this jack ##son ##ville ? [SEP] no it is not . [SEP]
-                #  type_ids:   0   0  0    0    0     0       0   0   1  1  1  1   1   1
-                # (b) For single sequences:
-                #  tokens:   [CLS] the dog is hairy . [SEP]
-                #  type_ids:   0   0   0   0  0     0   0
-                #
-                # Where "type_ids" are used to indicate whether this is the first
-                # sequence or the second sequence. The embedding vectors for `type=0` and
-                # `type=1` were learned during pre-training and are added to the wordpiece
-                # embedding vector (and position vector). This is not *strictly* necessary
-                # since the [SEP] token unambiguously separates the sequences, but it makes
-                # it easier for the model to learn the concept of sequences.
-                #
-                # For classification tasks, the first vector (corresponding to [CLS]) is
-                # used as as the "sentence vector". Note that this only makes sense because
-                # the entire model is fine-tuned.
                 tokens = tokens_a + [sep_token]
                 if sep_token_extra and bool(tokens_b):
                     # roberta uses an extra separator b/w pairs of sentences
@@ -671,12 +668,13 @@ def load_bert_xlnet_roberta_input_tensors(args, statement_jsonl_path, model_type
                 # assert len(mask_token_index) == 3, "More than three masked position in one example"
                 block_flag = [0]*len(input_ids)
                 mlm_mask = [0]*len(input_ids)
-                if args.input_format == 'p-tuning':
-                    block_flag[mask_token_index[0]] = 1  # 1 for prompt placeholder
-                    block_flag[mask_token_index[1]] = 1
-                    mlm_mask[mask_token_index[2]] = 1 # 1 for masked token
+                if args.input_format in ['p-tuning', 'soft-prompt']:
+                    for idx in mask_token_index[0:-1]:
+                        block_flag[idx] = 1  # 1 for prompt placeholder
+                    mlm_mask[mask_token_index[-1]] = 1 # 1 for masked token
                 elif args.input_format == 'hard-prompt':
-                    mlm_mask[mask_token_index[0]] = 1  # 1 for masked token
+                    if len(mask_token_index) == 1:
+                        mlm_mask[mask_token_index[-1]] = 1  # 1 for masked token
 
 
                 # Zero-pad up to the sequence length.
@@ -753,7 +751,8 @@ def load_bert_xlnet_roberta_input_tensors(args, statement_jsonl_path, model_type
                                             cls_token_segment_id=2 if model_type in ['xlnet'] else 0,
                                             pad_on_left=bool(model_type in ['xlnet']),  # pad on the left for xlnet
                                             pad_token_segment_id=4 if model_type in ['xlnet'] else 0,
-                                            sequence_b_segment_id=0 if model_type in ['roberta', 'albert'] else 1)
+                                            sequence_b_segment_id=0 if model_type in ['roberta', 'albert'] else 1,
+                                            num_prompt_token=args.prompt_token_num)
     example_ids = [f.example_id for f in features]
     *data_tensors, all_label, prompt_data_tensors = convert_features_to_tensors(features)
     assert len(prompt_data_tensors) == 3, "Prompt data tensor error"

@@ -2,7 +2,7 @@ import torch
 
 from utils.layers import *
 from modeling.text_encoder import TextEncoder,PromptTextEncoder
-from modeling.kg_encoder import RelationNet, Path_Encoder, PromptKGEncoder
+from modeling.kg_encoder import RelationNet, Path_Encoder, PromptKGEncoder, SoftPromptEncoder
 from transformers import GPT2Tokenizer
 
 class LMRelationNet(nn.Module):
@@ -54,11 +54,14 @@ class PromptLMRelationNet(nn.Module):
         self.prompt_token_num = prompt_token_num
         self.kg_enc_out_size = self.encoder.sent_dim * prompt_token_num
 
-        self.decoder = PromptKGEncoder(concept_num, concept_dim, relation_num, relation_dim, self.encoder.sent_dim, concept_in_dim,
-                                   hidden_size, num_hidden_layers, self.kg_enc_out_size,
-                                   fc_size, num_fc_layers, dropout, pretrained_concept_emb, pretrained_relation_emb,
-                                   freeze_ent_emb=freeze_ent_emb, init_range=init_range, ablation=ablation,
-                                   use_contextualized=use_contextualized, emb_scale=emb_scale)
+        if self.args.input_format == 'soft-prompt':
+            self.decoder = SoftPromptEncoder(args=self.args, init_range=init_range, embed_size=self.encoder.sent_dim)
+        else:
+            self.decoder = PromptKGEncoder(concept_num, concept_dim, relation_num, relation_dim, self.encoder.sent_dim, concept_in_dim,
+                                       hidden_size, num_hidden_layers, self.kg_enc_out_size,
+                                       fc_size, num_fc_layers, dropout, pretrained_concept_emb, pretrained_relation_emb,
+                                       freeze_ent_emb=freeze_ent_emb, init_range=init_range, ablation=ablation,
+                                       use_contextualized=use_contextualized, emb_scale=emb_scale)
 
         self.m2c = self._build_mlm_logits_to_cls_logits_tensor()
         # self.path_encoder = Path_Encoder(self.encoder.sent_dim)
@@ -106,8 +109,8 @@ class PromptLMRelationNet(nn.Module):
 
             outputs = self.encoder(inputs_embeds=inputs['inputs_embeds'],
                                     attention_mask=inputs['attention_mask'],
-                                    token_type_ids=None,
-                                    labels=None)
+                                    token_type_ids=None)
+
             prediction_scores = outputs[0] # (bs*5, max_len, vocab_size)
             masked_logits = prediction_scores[mlm_mask == 1]  # (bs*5, vocab_size)
             # (bs*5, 2)
@@ -115,6 +118,39 @@ class PromptLMRelationNet(nn.Module):
             # (bs*5)
             mlm_label = mlm_label.view((-1))
             return cls_logits, mlm_label
+        elif self.args.input_format == 'soft-prompt':
+            # (bs*5, max_len)
+            raw_embeds = self.encoder.module.roberta.embeddings.word_embeddings(input_ids)
+            bs = raw_embeds.shape[0]
+
+            # (num_prompt, embed_size)
+            device = raw_embeds.device
+            replace_embeds = self.decoder(device)
+            if replace_embeds.shape[-1] != raw_embeds.shape[-1]:
+                print("the dim of soft prompt {} and raw embeddings {} is different".format(replace_embeds.shape[-1],
+                                                                                            raw_embeds.shape[-1]))
+
+            blocked_indices = (block_flag == 1).nonzero().reshape((-1, self.prompt_token_num, 2))[:, :, 1]
+
+            for bidx in range(bs):
+                for i in range(blocked_indices.shape[1]):
+                    raw_embeds[bidx, blocked_indices[bidx, i], :] = replace_embeds[i, :]
+
+            inputs = {'inputs_embeds': raw_embeds, 'attention_mask': input_mask}
+
+            outputs = self.encoder(inputs_embeds=inputs['inputs_embeds'],
+                                   attention_mask=inputs['attention_mask'],
+                                   token_type_ids=None)
+
+            prediction_scores = outputs[0]  # (bs*5, max_len, vocab_size)
+            masked_logits = prediction_scores[mlm_mask == 1]  # (bs*5, vocab_size)
+            # (bs*5, 2)
+            cls_logits = torch.stack([self._convert_single_mlm_logits_to_cls_logits(ml) for ml in masked_logits])
+            # (bs*5)
+            mlm_label = mlm_label.view((-1))
+            return cls_logits, mlm_label
+
+
 
     def _convert_single_mlm_logits_to_cls_logits(self, logits):
         m2c = self.m2c.to(logits.device) # (2,1)

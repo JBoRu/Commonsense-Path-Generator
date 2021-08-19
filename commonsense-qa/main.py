@@ -75,6 +75,25 @@ def main():
         raise ValueError('Invalid mode')
 
 
+def freeze_and_unfreeze_net(model, args):
+    if args.freeze_enc:
+        freeze_net(model.encoder)
+    else:
+        unfreeze_net(model.encoder)
+
+    if args.freeze_dec: # refer to decoder embeddings
+        if args.input_format == 'soft-prompt':
+            freeze_net(model.decoder)
+        else:
+            freeze_net(model.decoder.rel_emb)
+            freeze_net(model.decoder.concept_emb)
+    else:
+        if args.input_format == 'soft-prompt':
+            unfreeze_net(model.decoder)
+        else:
+            unfreeze_net(model.decoder.rel_emb)
+            unfreeze_net(model.decoder.concept_emb)
+
 def train(args):
     # print(args)
 
@@ -121,7 +140,7 @@ def train(args):
     path_embedding_path = os.path.join('./path_embeddings/', args.dataset, 'path_embedding.pickle')
 
     # initialize dataloader
-    if args.input_format in ['p-tuning', 'hard-prompt']:
+    if args.input_format in ['p-tuning', 'hard-prompt', 'soft-prompt']:
         dataset = LMRelationNetDataLoader(args, path_embedding_path,
                                           args.train_statements, args.train_rel_paths,
                                           args.dev_statements, args.dev_rel_paths,
@@ -156,7 +175,7 @@ def train(args):
     ###################################################################################################
 
     lstm_config = get_lstm_config_from_args(args)
-    if args.input_format in ['p-tuning', 'hard-prompt']:
+    if args.input_format in ['p-tuning', 'hard-prompt', 'soft-prompt']:
         model = PromptLMRelationNet(args=args, model_name=args.encoder, label_list_len=2, from_checkpoint=args.from_checkpoint,
                           concept_num=concept_num, concept_dim=relation_dim,
                           relation_num=relation_num, relation_dim=relation_dim,
@@ -166,9 +185,7 @@ def train(args):
                           pretrained_concept_emb=cp_emb, pretrained_relation_emb=rel_emb, freeze_ent_emb=args.freeze_ent_emb,
                           init_range=args.init_range, ablation=args.ablation, use_contextualized=use_contextualized,
                           emb_scale=args.emb_scale)
-        unfreeze_net(model.encoder.module)
-        unfreeze_net(model.decoder.rel_emb)
-        unfreeze_net(model.decoder.concept_emb)
+        freeze_and_unfreeze_net(model, args)
     elif args.input_format == 'path-generate':
         model = LMRelationNet(model_name=args.encoder, from_checkpoint=args.from_checkpoint, concept_num=concept_num, concept_dim=relation_dim,
                           relation_num=relation_num, relation_dim=relation_dim,
@@ -189,7 +206,7 @@ def train(args):
         return
 
     no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
-    if args.input_format == "p-tuning":
+    if args.input_format in ["p-tuning", 'hard-prompt', 'soft-prompt', 'path-generate']:
         grouped_parameters = [
             {'params': [p for n, p in model.encoder.named_parameters() if not any(nd in n for nd in no_decay)],
              'weight_decay': args.weight_decay, 'lr': args.encoder_lr},
@@ -199,24 +216,6 @@ def train(args):
              'weight_decay': args.weight_decay, 'lr': args.decoder_lr},
             {'params': [p for n, p in model.decoder.named_parameters() if any(nd in n for nd in no_decay)],
              'weight_decay': 0.0, 'lr': args.decoder_lr},
-        ]
-    elif args.input_format == "hard-prompt":
-        grouped_parameters = [
-            {'params': [p for n, p in model.encoder.named_parameters() if not any(nd in n for nd in no_decay)],
-             'weight_decay': args.weight_decay, 'lr': args.encoder_lr},
-            {'params': [p for n, p in model.encoder.named_parameters() if any(nd in n for nd in no_decay)],
-             'weight_decay': 0.0, 'lr': args.encoder_lr},
-            {'params': [p for n, p in model.decoder.named_parameters() if not any(nd in n for nd in no_decay)],
-             'weight_decay': args.weight_decay, 'lr': args.decoder_lr},
-            {'params': [p for n, p in model.decoder.named_parameters() if any(nd in n for nd in no_decay)],
-             'weight_decay': 0.0, 'lr': args.decoder_lr},
-        ]
-    elif args.input_format == "path-generate":
-        grouped_parameters = [
-            {'params': [p for n, p in model.encoder.named_parameters() if not any(nd in n for nd in no_decay)], 'weight_decay': args.weight_decay, 'lr': args.encoder_lr},
-            {'params': [p for n, p in model.encoder.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0, 'lr': args.encoder_lr},
-            {'params': [p for n, p in model.decoder.named_parameters() if not any(nd in n for nd in no_decay)], 'weight_decay': args.weight_decay, 'lr': args.decoder_lr},
-            {'params': [p for n, p in model.decoder.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0, 'lr': args.decoder_lr},
         ]
 
     optimizer = OPTIMIZER_CLASSES[args.optim](grouped_parameters)
@@ -259,19 +258,19 @@ def train(args):
     rel_grad = []
     linear_grad = []
     for epoch_id in range(args.n_epochs):
-        if epoch_id == args.unfreeze_epoch:
-            print('encoder unfreezed')
-            unfreeze_net(model.encoder)
-        if epoch_id == args.refreeze_epoch:
-            print('encoder refreezed')
-            freeze_net(model.encoder)
+        # if epoch_id == args.unfreeze_epoch:
+        #     print('encoder unfreezed')
+        #     unfreeze_net(model.encoder)
+        # if epoch_id == args.refreeze_epoch:
+        #     print('encoder refreezed')
+        #     freeze_net(model.encoder)
         model.train()
         for qids, labels, *input_data, prompt_data in dataset.train():
             optimizer.zero_grad()
             bs = labels.size(0)
             for a in range(0, bs, args.mini_batch_size):
                 b = min(a + args.mini_batch_size, bs)
-                if args.input_format in ['p-tuning','hard-prompt']:
+                if args.input_format in ['p-tuning','hard-prompt', 'soft-prompt']:
                     logits, mlm_labels = model(*[x[a:b] for x in input_data], prompt_data=[x[a:b] for x in prompt_data])
                 elif args.input_format == 'path-generate':
                     logits, _ = model(*[x[a:b] for x in input_data], layer_id=args.encoder_layer)
@@ -285,7 +284,7 @@ def train(args):
                     y = wrong_logits.new_ones((wrong_logits.size(0),))
                     loss = loss_func(correct_logits, wrong_logits, y)  # margin ranking loss
                 elif args.loss == 'cross_entropy':
-                    if args.input_format in ['p-tuning','hard-prompt']:
+                    if args.input_format in ['p-tuning','hard-prompt', 'soft-prompt']:
                         loss = loss_func(logits, mlm_labels)
                     elif args.input_format == 'path-generate':
                         loss = loss_func(logits, labels[a:b])
@@ -313,7 +312,7 @@ def train(args):
             global_step += 1
 
         model.eval()
-        if args.input_format in ['p-tuning','hard-prompt']:
+        if args.input_format in ['p-tuning','hard-prompt', 'soft-prompt']:
             dev_acc = evaluate_accuracy_prompt(dataset.dev(), model)
             test_acc = evaluate_accuracy_prompt(dataset.test(), model) if dataset.test_size() > 0 else 0.0
         elif args.input_format == 'path-generate':

@@ -237,3 +237,49 @@ class PromptKGEncoder(nn.Module):
         else:
             logits = self.hid2out(self.dropout_m(torch.cat((path_embedding, pooled_vecs), 1))) # (bs, hid)
         return logits
+
+class SoftPromptEncoder(nn.Module):
+
+    def __init__(self, args, init_range, embed_size):
+
+        super().__init__()
+        self.args = args
+        self.init_range = init_range
+        self.hidden_size = embed_size
+        self.prompt_token_num = self.args.prompt_token_num
+
+        self.prompt_embeddings = torch.nn.Embedding(self.prompt_token_num, embed_size)
+        # prompt_encoder_type == "lstm":
+        self.lstm_head = torch.nn.LSTM(input_size=self.hidden_size,
+                                       hidden_size=self.hidden_size,
+                                       num_layers=2,
+                                       bidirectional=True,
+                                       batch_first=True)
+        self.mlp_head = nn.Sequential(nn.Linear(2 * self.hidden_size, self.hidden_size),
+                                      nn.ReLU(),
+                                      nn.Linear(self.hidden_size, self.hidden_size))
+
+        if self.init_range > 0:
+            self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        if isinstance(module, (nn.Linear, nn.Embedding)):
+            module.weight.data.normal_(mean=0.0, std=self.init_range)
+            if isinstance(module, nn.Linear) and module.bias is not None:
+                module.bias.data.zero_()
+        elif isinstance(module, nn.LayerNorm):
+            module.bias.data.zero_()
+            module.weight.data.fill_(1.0)
+
+    def forward(self, device):
+        replace_embeds = self.prompt_embeddings(
+            torch.LongTensor(list(range(self.prompt_token_num))).to(device)) # (2, embed_size)
+        replace_embeds = replace_embeds.unsqueeze(0) # (1, 2, embed_size)
+
+        replace_embeds = self.lstm_head(replace_embeds)[0]  # [1, 2, 2 * hidden_dim]
+        if self.prompt_token_num == 1:
+            replace_embeds = self.mlp_head(replace_embeds) # [1, 2, hid_dim]
+        else:
+            replace_embeds = self.mlp_head(replace_embeds).squeeze() # [2, hid_dim]
+
+        return replace_embeds
