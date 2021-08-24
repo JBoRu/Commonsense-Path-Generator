@@ -70,6 +70,6 @@ class PreprocessData_Ground(object):
                 if (_id + 1) % 4 == 0:
                     data_context.append(question_context)
                     question_context = []
-        data_context = torch.tensor(data_context, dtype=torch.long)
+        data_context = torch.tensor(data_context, dtype=torch.long) # (num_sampels, 5, 36, max_len)
         return data_context 
 

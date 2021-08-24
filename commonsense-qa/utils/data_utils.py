@@ -675,6 +675,8 @@ def load_bert_xlnet_roberta_input_tensors(args, statement_jsonl_path, model_type
                 elif args.input_format == 'hard-prompt':
                     if len(mask_token_index) == 1:
                         mlm_mask[mask_token_index[-1]] = 1  # 1 for masked token
+                    else:
+                        print("There are more than 1 mask in hard-prompt format!")
 
 
                 # Zero-pad up to the sequence length.

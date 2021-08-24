@@ -63,6 +63,8 @@ class PromptLMRelationNet(nn.Module):
                                        freeze_ent_emb=freeze_ent_emb, init_range=init_range, ablation=ablation,
                                        use_contextualized=use_contextualized, emb_scale=emb_scale)
 
+
+
         self.m2c = self._build_mlm_logits_to_cls_logits_tensor()
         # self.path_encoder = Path_Encoder(self.encoder.sent_dim)
 

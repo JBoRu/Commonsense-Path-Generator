@@ -58,7 +58,7 @@ class Generator(nn.Module):
         with torch.no_grad():
             for step in range(self.max_len - 1):
                 outputs = self.gpt(next_token, past=past)
-                hidden = outputs[0][:, -1]
+                hidden = outputs[0][:, -1] # (bs, hid)
                 hidden_list.append(hidden)
                 past = outputs[1]
                 next_token_logits = self.lm_head(hidden)
@@ -68,7 +68,7 @@ class Generator(nn.Module):
         outputs = self.gpt(next_token, past=past)
         hidden = outputs[0][:, -1]
         hidden_list.append(hidden)
-        hidden_list = torch.stack(hidden_list, dim=1)
+        hidden_list = torch.stack(hidden_list, dim=1) # (bs, seq_len, hid)
         next_token_logits = self.lm_head(hidden)
         next_logits, next_token = next_token_logits.topk(k=1, dim=1)
         generated = torch.cat((generated, next_token), dim=1)
