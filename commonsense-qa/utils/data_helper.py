@@ -23,6 +23,7 @@ class DataHelper(object):
         elif 'obqa' in args.data_dir:
             from .preprocess_obqa import PreprocessData_Ground
 
+        print("init preprocesser")
         preprocesser = PreprocessData_Ground(args.data_dir, args.generator_type, args.context_len)
  
         self.PAD = preprocesser.PAD

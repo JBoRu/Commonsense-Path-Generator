@@ -2,7 +2,7 @@ import torch
 
 from utils.layers import *
 from modeling.text_encoder import TextEncoder,PromptTextEncoder
-from modeling.kg_encoder import RelationNet, Path_Encoder, PromptKGEncoder, SoftPromptEncoder
+from modeling.kg_encoder import RelationNet, Path_Encoder, PromptKGEncoder, SoftPromptEncoder, GPTGenerater
 from transformers import GPT2Tokenizer
 
 class LMRelationNet(nn.Module):
@@ -56,6 +56,8 @@ class PromptLMRelationNet(nn.Module):
 
         if self.args.input_format == 'soft-prompt':
             self.decoder = SoftPromptEncoder(args=self.args, init_range=init_range, embed_size=self.encoder.sent_dim)
+        elif self.args.input_format == 'p-tuning-GPT':
+            self.decoder = GPTGenerater(args=self.args, text_emb_size=self.encoder.sent_dim, init_range=init_range)
         else:
             self.decoder = PromptKGEncoder(concept_num, concept_dim, relation_num, relation_dim, self.encoder.sent_dim, concept_in_dim,
                                        hidden_size, num_hidden_layers, self.kg_enc_out_size,
@@ -69,7 +71,7 @@ class PromptLMRelationNet(nn.Module):
         # self.path_encoder = Path_Encoder(self.encoder.sent_dim)
 
 
-    def forward(self, *inputs, prompt_data):
+    def forward(self, *inputs, prompt_data, sample_ids=None, type=None):
         inputs = [x.view(x.size(0) * x.size(1), *x.size()[2:]) for x in inputs]  # merge the batch dimension and the num_choice dimension
         *lm_inputs, path_embedding, qa_ids, rel_ids, num_tuples = inputs
         input_ids, input_mask, segment_ids, output_mask = lm_inputs
@@ -114,6 +116,35 @@ class PromptLMRelationNet(nn.Module):
                                     token_type_ids=None)
 
             prediction_scores = outputs[0] # (bs*5, max_len, vocab_size)
+            masked_logits = prediction_scores[mlm_mask == 1]  # (bs*5, vocab_size)
+            # (bs*5, 2)
+            cls_logits = torch.stack([self._convert_single_mlm_logits_to_cls_logits(ml) for ml in masked_logits])
+            # (bs*5)
+            mlm_label = mlm_label.view((-1))
+            return cls_logits, mlm_label
+        elif self.args.input_format == 'p-tuning-GPT':
+            # (bs*5, max_len)
+            raw_embeds = self.encoder.module.roberta.embeddings.word_embeddings(input_ids)
+
+            # (bs, num_prompt(num_context), embed_size)
+            replace_embeds = self.decoder(type, sample_ids)
+            bs = replace_embeds.shape[0]
+            if replace_embeds.shape[-1] != raw_embeds.shape[-1]:
+                print("the dim of soft prompt {} and raw embeddings {} is different".format(replace_embeds.shape[-1],
+                                                                                            raw_embeds.shape[-1]))
+            blocked_indices = (block_flag == 1).nonzero().reshape((-1, self.prompt_token_num, 2))[:, :, 1]
+
+            for bidx in range(bs):
+                for i in range(blocked_indices.shape[1]):
+                    raw_embeds[bidx, blocked_indices[bidx, i], :] = replace_embeds[bidx, i, :]
+
+            inputs = {'inputs_embeds': raw_embeds, 'attention_mask': input_mask}
+
+            outputs = self.encoder(inputs_embeds=inputs['inputs_embeds'],
+                                   attention_mask=inputs['attention_mask'],
+                                   token_type_ids=None)
+
+            prediction_scores = outputs[0]  # (bs*5, max_len, vocab_size)
             masked_logits = prediction_scores[mlm_mask == 1]  # (bs*5, vocab_size)
             # (bs*5, 2)
             cls_logits = torch.stack([self._convert_single_mlm_logits_to_cls_logits(ml) for ml in masked_logits])

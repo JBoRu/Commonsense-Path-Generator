@@ -40,6 +40,7 @@ class LMRelationNetDataLoader(object):
         self.dev_data += load_2hop_relational_paths(dev_rpath_jsonl, dev_adj_path,
                                                     emb_pk_path=dev_node_features_path if use_contextualized else None,
                                                     max_tuple_num=max_tuple_num, num_choice=num_choice, node_feature_type=node_feature_type)
+
         assert all(len(self.train_qids) == x.size(0) for x in [self.train_labels] + self.train_data)
         assert all(len(self.dev_qids) == x.size(0) for x in [self.dev_labels] + self.dev_data)
         if test_statement_path is not None:

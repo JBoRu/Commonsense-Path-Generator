@@ -77,3 +77,48 @@ class Generator(nn.Module):
         else:
             return hidden_list.mean(1)
 
+class GeneratorForPrompt(nn.Module):
+    """docstring for GPT2LM"""
+    def __init__(self, gpt, config, max_len):
+        super(GeneratorForPrompt, self).__init__()
+        self.gpt = gpt
+        self.config = config
+        self.max_len = max_len
+        self.hid_size = config.n_embd
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+
+        self.tie_weights()
+
+    def tie_weights(self):
+        self.lm_head.weight = nn.Parameter(self.gpt.wte.weight)
+
+    def forward(self, inputs, train=False, return_path=False):
+        # input: [batch, seq]
+        # context_len = inputs.size(1)
+        # print(context_len)
+        generated = inputs
+        next_token = inputs
+        past = None
+        hidden_list = []
+        # accu_scores = torch.zeros(inputs.size(0)).to(inputs.device)
+
+        for step in range(self.max_len - 1):
+            outputs = self.gpt(next_token, past=past)
+            hidden = outputs[0][:, -1] # (bs, hid)
+            hidden_list.append(hidden)
+            past = outputs[1]
+            # next_token_logits = self.lm_head(hidden)
+            # next_logits, next_token = next_token_logits.topk(k=1, dim=1)
+            # generated = torch.cat((generated, next_token), dim=1)
+
+        outputs = self.gpt(next_token, past=past)
+        hidden = outputs[0][:, -1]
+        hidden_list.append(hidden)
+        hidden_list = torch.stack(hidden_list, dim=1) # (bs, seq_len, hid)
+        # next_token_logits = self.lm_head(hidden)
+        # next_logits, next_token = next_token_logits.topk(k=1, dim=1)
+        # generated = torch.cat((generated, next_token), dim=1)
+        if return_path:
+            return hidden_list.mean(1), generated
+        else:
+            return hidden_list.mean(1) # (bs, hid)

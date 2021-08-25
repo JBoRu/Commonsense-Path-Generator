@@ -141,6 +141,11 @@ def get_parser():
     parser.add_argument('--cpnet_vocab_path', default='./data/cpnet/concept.txt')
     parser.add_argument('--cpnet_graph_path', default='./data/cpnet/conceptnet.en.pruned.graph')
     parser.add_argument('-p', '--nprocs', type=int, default=cpu_count(), help='number of processes to use')
+    # for GPT kg generator
+    parser.add_argument('--data_dir', default='csqa', type=str)
+    parser.add_argument('--generator_type', default='gpt2', type=str)
+    parser.add_argument('--context_len', default=16, type=int)
+    parser.add_argument('--output_len', default=16, type=int, help='length of GPT2 generation')
 
     # data
     parser.add_argument('--train_rel_paths', default=f'./data/{args.dataset}/paths/train.relpath.2hop.jsonl')

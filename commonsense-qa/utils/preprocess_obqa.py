@@ -24,6 +24,7 @@ class PreprocessData_Ground(object):
         self.END = self.tokenizer.convert_tokens_to_ids('<END>')
 
         if not os.path.exists(self.ground_path):
+            print("Start reading grounded file")
             train_context_path = os.path.join(data_dir, 'grounded', 'train.grounded.jsonl')
             train_contexts = self.load_context(train_context_path)
             dev_context_path = os.path.join(data_dir, 'grounded', 'dev.grounded.jsonl')
@@ -38,6 +39,10 @@ class PreprocessData_Ground(object):
 
             with open(self.ground_path, 'wb') as handle:
                 pickle.dump(token_dataset, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
+            print("End reading grounded file")
+        else:
+            print("Existing file path!")
 
     def load_context(self, data_path):
         data_context = []
@@ -63,13 +68,18 @@ class PreprocessData_Ground(object):
 
                         choice_context.append(context)
                 num_context = len(choice_context)
-                for _ in range(36 - num_context):
+                for _ in range(16 - num_context): # TODO: change 36 to 10
                     _input = [self.PAD] * self.context_len 
                     choice_context.append(_input)
+
+                # choice_context_idx = [i for i in range(16)]
+                choice_context = random.sample(choice_context, k=16)
+
                 question_context.append(choice_context)
                 if (_id + 1) % 4 == 0:
                     data_context.append(question_context)
                     question_context = []
         data_context = torch.tensor(data_context, dtype=torch.long) # (num_sampels, 5, 36, max_len)
-        return data_context 
+        assert data_context.shape[2] == 16, "number of context is error!"
+        return data_context
 
