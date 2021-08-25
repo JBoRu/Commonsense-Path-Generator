@@ -34,7 +34,8 @@ class BatchGenerator(object):
             batch_tensors = [self._to_device(x[batch_indexes]) for x in self.tensors]
             batch_lists = [self._to_device([x[i] for i in batch_indexes]) for x in self.lists]
             batch_prompt = [self._to_device(x[batch_indexes]) for x in self.prompt_data]
-            yield tuple([batch_qids, batch_labels, *batch_tensors, *batch_lists, batch_prompt])
+            batch_indexes = self._to_device(batch_indexes)
+            yield tuple([batch_indexes, batch_qids, batch_labels, *batch_tensors, *batch_lists, batch_prompt])
 
     def _to_device(self, obj):
         if isinstance(obj, (tuple, list)):
@@ -589,7 +590,7 @@ def load_bert_xlnet_roberta_input_tensors(args, statement_jsonl_path, model_type
             # for one sample
             for ending_idx, (context, ending) in enumerate(zip(example.contexts, example.endings)):
                 # experiment with p-tuning format!
-                if args.input_format == 'p-tuning':
+                if args.input_format in ['p-tuning', 'p-tuning-GPT']:
                     kg_prefix = "According to: "
                     kg = [mask_token for i in range(num_prompt_token)]
                     kg = " ".join(kg)
@@ -668,7 +669,7 @@ def load_bert_xlnet_roberta_input_tensors(args, statement_jsonl_path, model_type
                 # assert len(mask_token_index) == 3, "More than three masked position in one example"
                 block_flag = [0]*len(input_ids)
                 mlm_mask = [0]*len(input_ids)
-                if args.input_format in ['p-tuning', 'soft-prompt']:
+                if args.input_format in ['p-tuning', 'soft-prompt', 'p-tuning-GPT']:
                     for idx in mask_token_index[0:-1]:
                         block_flag[idx] = 1  # 1 for prompt placeholder
                     mlm_mask[mask_token_index[-1]] = 1 # 1 for masked token
