@@ -210,7 +210,8 @@ def train(args):
         scheduler = get_constant_schedule_with_warmup(optimizer, warmup_steps=args.warmup_steps)
     elif args.lr_schedule == 'warmup_linear':
         max_steps = int(args.n_epochs * (dataset.train_size() / args.batch_size))
-        scheduler = get_linear_schedule_with_warmup(optimizer, warmup_steps=args.warmup_steps, t_total=max_steps)
+        print("Using warmup linear with warmup steps: {} of max steps: {}".format(args.warmup_steps, max_steps))
+        scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=args.warmup_steps, num_training_steps=max_steps)
     elif 'warmup' in args.lr_schedule:
         scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=args.warmup_steps, num_training_steps=args.max_steps)
 
@@ -270,7 +271,7 @@ def train(args):
                     loss = loss_func(correct_logits, wrong_logits, y)  # margin ranking loss
                 elif args.loss == 'cross_entropy':
                     if args.input_format in ['p-tuning', 'hard-prompt', 'soft-prompt', 'p-tuning-GPT']:
-                        loss = loss_func(logits, mlm_labels)
+                        loss = loss_func(logits, mlm_labels) # (bs, 2) (bs)
                     elif args.input_format == 'path-generate':
                         loss = loss_func(logits, labels[a:b])
 
@@ -315,7 +316,7 @@ def train(args):
             best_dev_epoch = epoch_id
             if args.save_model == 1:
                 torch.save([model, args], model_path)
-            print(f'model saved to {model_path}')
+                print(f'model saved to {model_path}')
 
         model.train()
         start_time = time.time()

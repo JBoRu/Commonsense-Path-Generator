@@ -256,3 +256,81 @@ python main.py \
 	--freeze_enc 1 \
 	--freeze_dec 0 \
 	--prompt_token_num 36 \
+
+	python main.py \
+	--dataset csqa \
+	--input_format soft_prompt \
+	--inhouse 1 \
+	--save_dir ./saved_models/csqa/uf_dec-f_encoder_gpt-pro_tok_num_6-soft_prompt_GPT \
+	--encoder gpt2 \
+	--max_seq_len 110 \
+	--encoder_lr 1e-5 \
+	--decoder_lr 1e-5 \
+	--batch_size 16 \
+	--mini_batch_size 8 \
+	--dropoutm 0.1 \
+	--gpu_device 3 \
+	--nprocs 20 \
+	--save_model 1 \
+	--mlp_dim 300 \
+	--mlp_layer_num 1 \
+	--fc_dim  2048 \
+	--fc_layer_num 2 \
+	--seed 42 \
+	--ablation no_dynamic_kg \
+	--freeze_enc 1 \
+	--freeze_dec 0 \
+	--prompt_token_num 6 \
+
+	python main.py \
+	--dataset csqa \
+	--input_format soft-prompt \
+	--inhouse 1 \
+	--save_dir ./saved_models/csqa/f_dec_with_lstm-f_encoder_gpt-pro_tok_num_6-soft_prompt_GPT \
+	--encoder gpt2 \
+	--max_seq_len 110 \
+	--encoder_lr 1e-5 \
+	--decoder_lr 1e-5 \
+	--batch_size 16 \
+	--mini_batch_size 16 \
+	--dropoutm 0.1 \
+	--gpu_device 0 \
+	--nprocs 20 \
+	--save_model 1 \
+	--mlp_dim 300 \
+	--mlp_layer_num 1 \
+	--fc_dim  2048 \
+	--fc_layer_num 2 \
+	--seed 42 \
+	--ablation no_dynamic_kg \
+	--freeze_enc 0 \
+	--freeze_dec 0 \
+	--prompt_token_num 6 \
+
+	python main.py \
+	--dataset csqa \
+	--input_format soft-prompt \
+	--inhouse 1 \
+	--save_dir ./saved_models/csqa/f_dec_with_mlp-f_encoder_gpt-pro_tok_num_6-soft_prompt_GPT \
+	--encoder gpt2 \
+	--max_seq_len 110 \
+	--encoder_lr 1e-5 \
+	--decoder_lr 1e-5 \
+	--batch_size 16 \
+	--mini_batch_size 16 \
+	--dropoutm 0.1 \
+	--gpu_device 3 \
+	--nprocs 20 \
+	--save_model 1 \
+	--mlp_dim 300 \
+	--mlp_layer_num 1 \
+	--fc_dim  2048 \
+	--fc_layer_num 2 \
+	--seed 42 \
+	--ablation no_dynamic_kg \
+	--freeze_enc 0 \
+	--freeze_dec 0 \
+	--prompt_token_num 6 \
+	--n_epochs 10 \
+	--lr_schedule warmup_linear \
+	--warmup_steps 900

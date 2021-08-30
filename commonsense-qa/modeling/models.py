@@ -44,6 +44,7 @@ class PromptLMRelationNet(nn.Module):
                  use_contextualized=False, emb_scale=1.0, encoder_config={}):
         super().__init__()
         self.args = args
+        self.model_name = model_name
         self.use_contextualized = use_contextualized
         self.label_list = [0, 1]
         self.verbalize = {0: ["No"], 1: ["Yes"]}
@@ -73,7 +74,11 @@ class PromptLMRelationNet(nn.Module):
 
     def forward(self, *inputs, prompt_data, sample_ids=None, type=None):
         inputs = [x.view(x.size(0) * x.size(1), *x.size()[2:]) for x in inputs]  # merge the batch dimension and the num_choice dimension
-        *lm_inputs, path_embedding, qa_ids, rel_ids, num_tuples = inputs
+        if self.args.input_format == 'soft-prompt':
+            lm_inputs = inputs
+        else:
+            *lm_inputs, path_embedding, qa_ids, rel_ids, num_tuples = inputs
+
         input_ids, input_mask, segment_ids, output_mask = lm_inputs
 
         prompt_data = [x.view(x.size(0) * x.size(1), *x.size()[2:]) for x in prompt_data]
@@ -153,7 +158,10 @@ class PromptLMRelationNet(nn.Module):
             return cls_logits, mlm_label
         elif self.args.input_format == 'soft-prompt':
             # (bs*5, max_len)
-            raw_embeds = self.encoder.module.roberta.embeddings.word_embeddings(input_ids)
+            if "roberat" in self.model_name:
+                raw_embeds = self.encoder.module.roberta.embeddings.word_embeddings(input_ids)
+            elif "gpt" in self.model_name:
+                raw_embeds = self.encoder.module.transformer.wte(input_ids)
             bs = raw_embeds.shape[0]
 
             # (num_prompt, embed_size)

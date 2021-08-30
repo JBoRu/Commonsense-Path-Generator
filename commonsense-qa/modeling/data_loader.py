@@ -22,39 +22,41 @@ class LMRelationNetDataLoader(object):
         model_type = MODEL_NAME_TO_CLASS[model_name]
 
         # (num_example), (num_example, 5, max_seq_lem), (num_example, 5)
+        print("Load and process input data")
         self.train_qids, self.train_labels, *self.train_data, self.prompt_train_data = load_input_tensors(self.args, train_statement_path, model_type, model_name, max_seq_length)
         self.dev_qids, self.dev_labels, *self.dev_data, self.prompt_dev_data = load_input_tensors(self.args, dev_statement_path, model_type, model_name, max_seq_length)
 
         num_choice = self.train_data[0].size(1)
 
-        # (num_samples, 5, 5, hid_dim)
-        with open(path_embedding_path, 'rb') as handle:
-            path_embedding = pickle.load(handle)
-        self.train_data += [path_embedding['train']]
-        self.dev_data += [path_embedding['dev']]
-
-        # 5
-        self.train_data += load_2hop_relational_paths(train_rpath_jsonl, train_adj_path,
-                                                      emb_pk_path=train_node_features_path if use_contextualized else None,
-                                                      max_tuple_num=max_tuple_num, num_choice=num_choice, node_feature_type=node_feature_type)
-        self.dev_data += load_2hop_relational_paths(dev_rpath_jsonl, dev_adj_path,
-                                                    emb_pk_path=dev_node_features_path if use_contextualized else None,
-                                                    max_tuple_num=max_tuple_num, num_choice=num_choice, node_feature_type=node_feature_type)
-
-        assert all(len(self.train_qids) == x.size(0) for x in [self.train_labels] + self.train_data)
-        assert all(len(self.dev_qids) == x.size(0) for x in [self.dev_labels] + self.dev_data)
-        if test_statement_path is not None:
-            self.test_qids, self.test_labels, *self.test_data, self.prompt_test_data = load_input_tensors(self.args, test_statement_path, model_type, model_name, max_seq_length)
-            self.test_data += [path_embedding['test']]
-            self.test_data += load_2hop_relational_paths(test_rpath_jsonl, test_adj_path,
-                                                         emb_pk_path=test_node_features_path if use_contextualized else None,
-                                                         max_tuple_num=max_tuple_num, num_choice=num_choice, node_feature_type=node_feature_type)
-            assert all(len(self.test_qids) == x.size(0) for x in [self.test_labels] + self.test_data)
-
-        num_tuple_idx = -2 if use_contextualized else -1
-        print('| train_num_tuples = {:.2f} | dev_num_tuples = {:.2f} | test_num_tuples = {:.2f} |'.format(self.train_data[num_tuple_idx].float().mean(),
-                                                                                                          self.dev_data[num_tuple_idx].float().mean(),
-                                                                                                          self.test_data[num_tuple_idx].float().mean() if test_statement_path else 0))
+        # # (num_samples, 5, 5, hid_dim)
+        # print("Load path embedding data")
+        # with open(path_embedding_path, 'rb') as handle:
+        #     path_embedding = pickle.load(handle)
+        # self.train_data += [path_embedding['train']]
+        # self.dev_data += [path_embedding['dev']]
+        #
+        # # 5
+        # print("Load 2hop path data")
+        # self.train_data += load_2hop_relational_paths(train_rpath_jsonl, train_adj_path,
+        #                                               emb_pk_path=train_node_features_path if use_contextualized else None,
+        #                                               max_tuple_num=max_tuple_num, num_choice=num_choice, node_feature_type=node_feature_type)
+        # self.dev_data += load_2hop_relational_paths(dev_rpath_jsonl, dev_adj_path,
+        #                                             emb_pk_path=dev_node_features_path if use_contextualized else None,
+        #                                             max_tuple_num=max_tuple_num, num_choice=num_choice, node_feature_type=node_feature_type)
+        #
+        # assert all(len(self.train_qids) == x.size(0) for x in [self.train_labels] + self.train_data)
+        # assert all(len(self.dev_qids) == x.size(0) for x in [self.dev_labels] + self.dev_data)
+        # if test_statement_path is not None:
+        #     self.test_qids, self.test_labels, *self.test_data, self.prompt_test_data = load_input_tensors(self.args, test_statement_path, model_type, model_name, max_seq_length)
+        #     self.test_data += [path_embedding['test']]
+        #     self.test_data += load_2hop_relational_paths(test_rpath_jsonl, test_adj_path,
+        #                                                  emb_pk_path=test_node_features_path if use_contextualized else None,
+        #                                                  max_tuple_num=max_tuple_num, num_choice=num_choice, node_feature_type=node_feature_type)
+        #     assert all(len(self.test_qids) == x.size(0) for x in [self.test_labels] + self.test_data)
+        # num_tuple_idx = -2 if use_contextualized else -1
+        # print('| train_num_tuples = {:.2f} | dev_num_tuples = {:.2f} | test_num_tuples = {:.2f} |'.format(self.train_data[num_tuple_idx].float().mean(),
+        #                                                                                                   self.dev_data[num_tuple_idx].float().mean(),
+        #                                                                                                   self.test_data[num_tuple_idx].float().mean() if test_statement_path else 0))
 
         if self.is_inhouse:
             with open(inhouse_train_qids_path, 'r') as fin:

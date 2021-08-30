@@ -3,11 +3,11 @@ import pickle
 # import dgl
 import numpy as np
 import torch
-from transformers import (OpenAIGPTTokenizer, BertTokenizer, XLNetTokenizer, RobertaTokenizer, AlbertTokenizer)
+from transformers import (GPT2Tokenizer, BertTokenizer, XLNetTokenizer, RobertaTokenizer, AlbertTokenizer)
 
 from utils.tokenization_utils import *
 
-GPT_SPECIAL_TOKENS = ['_start_', '_delimiter_', '_classify_']
+GPT_SPECIAL_TOKENS = ["<PROMPT>","<PAD>","<END>","<SEP>"]
 
 class BatchGenerator(object):
     def __init__(self, device, batch_size, indexes, qids, labels, tensors=[], lists=[], prompt_data=[]):
@@ -433,20 +433,56 @@ def load_adj_data(adj_pk_path, max_node_num, num_choice, emb_pk_path=None):
     return concept_ids, node_type_ids, adj_lengths, emb_data, adj_data, half_n_rel * 2 + 1
 
 
-def load_gpt_input_tensors(statement_jsonl_path, max_seq_length):
+def construct_prompt_with_input(dataset):
+    prompt_dataset = []
+    for question, *choices, label in dataset:
+        question = "Question: " + question
+        choices = []
+        for choic_idx, choice in enumerate(choices):
+            choice = "Answer: " + choice
+            # prompt = " ".join([prompt_token]*3)
+            # sentence = prompt + " " + Q + " " + C + " " + prompt
+            # tokens = tokenizer.tokenize(sentence)
+            # choices_features.append(tokens)
+            choices.append(choice)
+        prompt_dataset.append((question, choices, label))
+    return prompt_dataset
+
+
+def load_gpt_input_tensors(statement_jsonl_path, max_seq_length, prompt_token_num):
+    class InputFeatures(object):
+
+        def __init__(self, example_id, choices_features, label):
+            self.example_id = example_id
+            self.choices_features = [
+                {
+                    'input_ids': input_ids,
+                    'input_mask': input_mask,
+                    'segment_ids': segment_ids,
+                    'output_mask': output_mask,
+                    'block_flag': block_flag,
+                    'mlm_mask': mlm_mask,
+                    'mlm_label': mlm_label,
+                }
+                for _, input_ids, input_mask, segment_ids, output_mask, block_flag, mlm_mask, mlm_label in choices_features
+            ]
+            self.label = label
+
     def _truncate_seq_pair(tokens_a, tokens_b, max_length):
         """Truncates a sequence pair in place to the maximum length."""
         while True:
             total_length = len(tokens_a) + len(tokens_b)
             if total_length <= max_length:
                 break
+            else:
+                print("the sentence length more than max_len!")
             if len(tokens_a) > len(tokens_b):
                 tokens_a.pop()
             else:
                 tokens_b.pop()
 
     def load_qa_dataset(dataset_path):
-        """ Output a list of tuples(story, 1st continuation, 2nd continuation, label) """
+        """ Output a list of tuples(sample_id, question, choices, label) """
         with open(dataset_path, "r", encoding="utf-8") as fin:
             output = []
             for line in fin:
@@ -455,32 +491,66 @@ def load_gpt_input_tensors(statement_jsonl_path, max_seq_length):
                 output.append((input_json['id'], input_json["question"]["stem"], *[ending["text"] for ending in input_json["question"]["choices"]], label))
         return output
 
-    def pre_process_datasets(encoded_datasets, num_choices, max_seq_length, start_token, delimiter_token, clf_token):
+    def pre_process_datasets(dataset, num_choices, max_seq_length, prompt_token_ids, pad_token_ids, end_token_ids, sep_token_ids, prompt_token_num):
         """ Pre-process datasets containing lists of tuples(story, 1st continuation, 2nd continuation, label)
 
             To Transformer inputs of shape (n_batch, n_alternative, length) comprising for each batch, continuation:
             input_ids[batch, alternative, :] = [start_token] + story[:cap_length] + [delimiter_token] + cont1[:cap_length] + [clf_token]
         """
-        tensor_datasets = []
-        for dataset in encoded_datasets:
-            n_batch = len(dataset)
-            input_ids = np.zeros((n_batch, num_choices, max_seq_length), dtype=np.int64)
-            mc_token_ids = np.zeros((n_batch, num_choices), dtype=np.int64)
-            lm_labels = np.full((n_batch, num_choices, max_seq_length), fill_value=-1, dtype=np.int64)
-            mc_labels = np.zeros((n_batch,), dtype=np.int64)
-            for i, data, in enumerate(dataset):
-                q, mc_label = data[0], data[-1]
-                choices = data[1:-1]
-                for j in range(len(choices)):
-                    _truncate_seq_pair(q, choices[j], max_seq_length - 3)
-                    qa = [start_token] + q + [delimiter_token] + choices[j] + [clf_token]
-                    input_ids[i, j, :len(qa)] = qa
-                    mc_token_ids[i, j] = len(qa) - 1
-                    lm_labels[i, j, :len(qa) - 1] = qa[1:]
-                mc_labels[i] = mc_label
-            all_inputs = (input_ids, mc_token_ids, lm_labels, mc_labels)
-            tensor_datasets.append(tuple(torch.tensor(t) for t in all_inputs))
-        return tensor_datasets
+        features = []
+        # for dataset in encoded_datasets:
+        n_batch = len(dataset)
+        for i, sample in enumerate(dataset):
+            choices_features = []
+            q, mc_label = sample[0], sample[-1]
+            choices = sample[1:-1]
+
+            for j in range(len(choices)):
+                c = choices[j]
+                q = " Question: " + q
+                c = " Answer: " + c
+                context = q + c
+                special_tokens_count = prompt_token_num
+                tokens_q = tokenizer.tokenize(q)
+                tokens_c = tokenizer.tokenize(c)
+                _truncate_seq_pair(tokens_q, tokens_c, max_seq_length - special_tokens_count)
+                qc_tokens = tokens_q + tokens_c
+                qc_tokens_ids = tokenizer.convert_tokens_to_ids(qc_tokens)
+
+                input_ids = [prompt_token_ids]*(int(prompt_token_num/2)) + qc_tokens_ids + [prompt_token_ids]*(int(prompt_token_num/2))
+
+                input_mask = [1]*len(input_ids)
+                prompt_token_idx = [index for index, id in enumerate(input_ids) if id == prompt_token_ids]
+                assert len(prompt_token_idx) == special_tokens_count
+                block_flag = [0]*len(input_ids)
+                for idx in prompt_token_idx:
+                    block_flag[idx] = 1 # 1 for prompt placeholder
+                mlm_mask = [0]*len(input_ids)
+                mlm_mask[-1] = 1
+
+                pad_length = max_seq_length - len(input_ids)
+                input_ids = input_ids + ([pad_token_ids]*pad_length)
+                input_mask = input_mask + ([0]*pad_length)
+                # note: i not use these two variable, only for consistent with input format of Roberta
+                output_mask = input_mask
+                segment_ids = input_mask
+                block_flag = block_flag + ([0] * pad_length)
+                mlm_mask = mlm_mask + ([0] * pad_length)
+
+                assert len(input_ids) == max_seq_length
+                assert len(output_mask) == max_seq_length
+                assert len(input_mask) == max_seq_length
+                assert len(segment_ids) == max_seq_length
+                assert len(block_flag) == max_seq_length
+                assert len(mlm_mask) == max_seq_length
+                mlm_label = 1 if j == int(mc_label) else 0
+
+                choices_features.append(
+                    (qc_tokens_ids, input_ids, input_mask, segment_ids, output_mask, block_flag, mlm_mask, mlm_label))
+
+            features.append(InputFeatures(example_id=i, choices_features=choices_features, label=mc_label))
+        assert len(features) == n_batch
+        return features
 
     def tokenize_and_encode(tokenizer, obj):
         """ Tokenize and encode a nested object """
@@ -491,23 +561,42 @@ def load_gpt_input_tensors(statement_jsonl_path, max_seq_length):
         else:
             return list(tokenize_and_encode(tokenizer, o) for o in obj)
 
-    tokenizer = OpenAIGPTTokenizer.from_pretrained('openai-gpt')
+    def select_field(features, field):
+        return [[choice[field] for choice in feature.choices_features] for feature in features]
+
+    def convert_features_to_tensors(features):
+        # (bs, 5, max_len)
+        all_input_ids = torch.tensor(select_field(features, 'input_ids'), dtype=torch.long)
+        all_input_mask = torch.tensor(select_field(features, 'input_mask'), dtype=torch.long)
+        all_segment_ids = torch.tensor(select_field(features, 'segment_ids'), dtype=torch.long)
+        all_output_mask = torch.tensor(select_field(features, 'output_mask'), dtype=torch.uint8)
+        all_block_flag = torch.tensor(select_field(features, 'block_flag'), dtype=torch.long)
+        all_mlm_mask = torch.tensor(select_field(features, 'mlm_mask'), dtype=torch.long)
+        # (bs, 5)
+        all_mlm_label = torch.tensor(select_field(features, 'mlm_label'), dtype=torch.long)
+        # (bs)
+        all_label = torch.tensor([f.label for f in features], dtype=torch.long)
+        return all_input_ids, all_input_mask, all_segment_ids, all_output_mask, all_label, (all_block_flag, all_mlm_mask, all_mlm_label)
+
+    tokenizer = GPT2Tokenizer.from_pretrained('/mnt/nlp_model/huggingface/gpt2/')
     tokenizer.add_tokens(GPT_SPECIAL_TOKENS)
     special_tokens_ids = tokenizer.convert_tokens_to_ids(GPT_SPECIAL_TOKENS)
+    PROMPT, PAD, END, SEP = special_tokens_ids
 
+    # [(id,q,cs,label),]
     dataset = load_qa_dataset(statement_jsonl_path)
-    examples_ids = [data[0] for data in dataset]
+    example_ids = [data[0] for data in dataset]
     dataset = [data[1:] for data in dataset]  # discard example ids
     num_choices = len(dataset[0]) - 2
 
-    encoded_dataset = tokenize_and_encode(tokenizer, dataset)
-
-    (input_ids, mc_token_ids, lm_labels, mc_labels), = pre_process_datasets([encoded_dataset], num_choices, max_seq_length, *special_tokens_ids)
-    return examples_ids, mc_labels, input_ids, mc_token_ids, lm_labels
+    features = pre_process_datasets(dataset, num_choices, max_seq_length, *special_tokens_ids, prompt_token_num)
+    *data_tensors, all_label, prompt_data_tensors = convert_features_to_tensors(features)
+    assert len(prompt_data_tensors) == 3, "Prompt data tensor error"
+    return (example_ids, all_label, *data_tensors, prompt_data_tensors)
 
 
 def get_gpt_token_num():
-    tokenizer = OpenAIGPTTokenizer.from_pretrained('openai-gpt')
+    tokenizer = GPT2Tokenizer.from_pretrained('/mnt/nlp_model/huggingface/gpt2/')
     tokenizer.add_tokens(GPT_SPECIAL_TOKENS)
     return len(tokenizer)
 
@@ -796,7 +885,7 @@ def load_input_tensors(args, input_jsonl_path, model_type, model_name, max_seq_l
     if model_type in ('lstm',):
         return load_lstm_input_tensors(input_jsonl_path, max_seq_length)
     elif model_type in ('gpt',):
-        return load_gpt_input_tensors(input_jsonl_path, max_seq_length)
+        return load_gpt_input_tensors(input_jsonl_path, max_seq_length, args.prompt_token_num)
     elif model_type in ('bert', 'xlnet', 'roberta', 'albert'):
         return load_bert_xlnet_roberta_input_tensors(args, input_jsonl_path, model_type, model_name, max_seq_length)
 

@@ -1,7 +1,7 @@
 import os
 from utils.layers import *
 import transformers
-assert transformers.__version__ == '2.8.0'
+# assert transformers.__version__ == '2.8.0'
 from transformers import GPT2Config, GPT2Tokenizer, GPT2Model
 # from transformers import *
 
@@ -272,7 +272,7 @@ class SoftPromptEncoder(nn.Module):
                                        num_layers=2,
                                        bidirectional=True,
                                        batch_first=True)
-        self.mlp_head = nn.Sequential(nn.Linear(2 * self.hidden_size, self.hidden_size),
+        self.mlp_head = nn.Sequential(nn.Linear(self.hidden_size, self.hidden_size),
                                       nn.ReLU(),
                                       nn.Linear(self.hidden_size, self.hidden_size))
 
@@ -290,14 +290,21 @@ class SoftPromptEncoder(nn.Module):
 
     def forward(self, device):
         replace_embeds = self.prompt_embeddings(
-            torch.LongTensor(list(range(self.prompt_token_num))).to(device)) # (2, embed_size)
-        replace_embeds = replace_embeds.unsqueeze(0) # (1, 2, embed_size)
+            torch.LongTensor(list(range(self.prompt_token_num))).to(device)) # (num_promt_token, embed_size)
+        replace_embeds = replace_embeds.unsqueeze(0) # (1, num_promt_token, embed_size)
 
-        replace_embeds = self.lstm_head(replace_embeds)[0]  # [1, 2, 2 * hidden_dim]
+        # if self.args.encoder == "gpt2":
+        #     sep = int(self.prompt_token_num/2)
+        #     replace_embeds_1 = self.lstm_head(replace_embeds[:, 0:sep, :])[0]
+        #     replace_embeds_2 = self.lstm_head(replace_embeds[:, sep:,:])[0]
+        #     replace_embeds = torch.cat((replace_embeds_1, replace_embeds_2), dim=1)
+        # else:
+        #     replace_embeds = self.lstm_head(replace_embeds)[0]  # [1, num_promt_token, 2 * hidden_dim]
+        #
         if self.prompt_token_num == 1:
             replace_embeds = self.mlp_head(replace_embeds) # [1, 2, hid_dim]
         else:
-            replace_embeds = self.mlp_head(replace_embeds).squeeze() # [2, hid_dim]
+            replace_embeds = self.mlp_head(replace_embeds).squeeze() # [num_promt_token, hid_dim]
 
         return replace_embeds
 
@@ -343,7 +350,7 @@ class GPTGenerater(nn.Module):
         elif type == 'dev':
             context_embedding = self._get_path_embedding_greedy(self.datahelper.devset.tensors[0], sample_ids, self.generator, self.args)
         elif type == 'test':
-            if self.args.is_inhouse:
+            if self.args.inhouse:
                 context_embedding = self._get_path_embedding_greedy(self.datahelper.trainset.tensors[0], sample_ids, self.generator, self.args)
             else:
                 context_embedding = self._get_path_embedding_greedy(self.datahelper.testset.tensors[0], sample_ids, self.generator, self.args)

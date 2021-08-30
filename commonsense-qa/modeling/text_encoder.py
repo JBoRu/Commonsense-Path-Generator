@@ -1,9 +1,10 @@
 from transformers import *
 from utils.layers import *
-from utils.data_utils import get_gpt_token_num
+from utils.data_utils import get_gpt_token_num, GPT_SPECIAL_TOKENS
 
 MODEL_CLASS_TO_NAME = {
-    'gpt': list(OPENAI_GPT_PRETRAINED_CONFIG_ARCHIVE_MAP.keys()),
+    # 'gpt': list(OPENAI_GPT_PRETRAINED_CONFIG_ARCHIVE_MAP.keys()),
+    'gpt': list(GPT2_PRETRAINED_CONFIG_ARCHIVE_MAP.keys()),
     'bert': list(BERT_PRETRAINED_CONFIG_ARCHIVE_MAP.keys()),
     'xlnet': list(XLNET_PRETRAINED_CONFIG_ARCHIVE_MAP.keys()),
     'roberta': list(ROBERTA_PRETRAINED_CONFIG_ARCHIVE_MAP.keys()),
@@ -28,6 +29,11 @@ MODEL_CLASSES_PROMPT = {
         'config': AlbertConfig,
         'tokenizer': AlbertTokenizer,
         'model': AlbertForMaskedLM
+    },
+    'gpt': {
+        'config': GPT2Config,
+        'tokenizer': GPT2Tokenizer,
+        'model': GPT2LMHeadModel
     }
 }
 
@@ -158,40 +164,22 @@ class PromptTextEncoder(nn.Module):
         super().__init__()
         self.model_type = MODEL_NAME_TO_CLASS[model_name]
         self.model_dict = MODEL_CLASSES_PROMPT[self.model_type]
-        # self.output_token_states = output_token_states
-        # assert not self.output_token_states or self.model_type in ('bert', 'roberta', 'albert')
-
-        # if self.model_type in ('lstm',):
-        #     self.module = LSTMTextEncoder(**kwargs, output_hidden_states=True)
-        #     self.sent_dim = self.module.output_size
-        # else:
-
-        # module_config = AutoConfig.from_pretrained(model_name, output_hidden_states=True, cache_dir='/mnt/nlp_model/huggingface')
-        # self.module = AutoModel.from_pretrained(model_name, config=module_config, cache_dir='/mnt/nlp_model/huggingface')
         print("Loading plm config....")
         config_class = self.model_dict['config']
-        model_config = config_class.from_pretrained(
-            # model_name,
-            "/mnt/nlp_model/huggingface/roberta-large/config.json",
-            num_labels=label_list_len,
-            # cache_dir="./mnt/nlp_data/huggingface/"
-        )
+        if self.model_type == 'roberta':
+            path = "/mnt/nlp_model/huggingface/roberta-large/"
+        elif self.model_type == 'gpt':
+            path = "/mnt/nlp_model/huggingface/gpt2/"
+
+        model_config = config_class.from_pretrained(path, num_labels=label_list_len)
 
         print("Loading plm tokenizer....")
         tokenizer_class = self.model_dict['tokenizer']
-        self.tokenizer = tokenizer_class.from_pretrained(
-            '/mnt/nlp_model/huggingface/roberta-large/',
-            # cache_dir="/mnt/nlp_model/huggingface/roberta-large/"
-        )
+        self.tokenizer = tokenizer_class.from_pretrained(path)
 
         print("Loading plm model....")
         model_class = self.model_dict['model']
-        self.module = model_class.from_pretrained(
-            # model_name,
-            "/mnt/nlp_model/huggingface/roberta-large/pytorch_model.bin",
-            config=model_config,
-            # cache_dir="./mnt/nlp_data/huggingface"
-        )
+        self.module = model_class.from_pretrained(path, config=model_config)
 
         if not from_checkpoint == 'None':
             # self.module = self.module.from_pretrained(from_checkpoint, config=module_config, cache_dir='../cache/')
@@ -208,7 +196,8 @@ class PromptTextEncoder(nn.Module):
             self.module.load_state_dict(model_dict)
 
         if self.model_type in ('gpt',):
-            self.module.resize_token_embeddings(get_gpt_token_num())
+            self.tokenizer.add_tokens(GPT_SPECIAL_TOKENS)
+            self.module.resize_token_embeddings(len(self.tokenizer))
 
         self.sent_dim = self.module.config.n_embd if self.model_type in ('gpt',) else self.module.config.hidden_size
 
