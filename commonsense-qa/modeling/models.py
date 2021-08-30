@@ -1,7 +1,7 @@
 import torch
 
 from utils.layers import *
-from modeling.text_encoder import TextEncoder,PromptTextEncoder
+from modeling.text_encoder import TextEncoder,PromptTextEncoder, ClassifyMLPHead
 from modeling.kg_encoder import RelationNet, Path_Encoder, PromptKGEncoder, SoftPromptEncoder, GPTGenerater
 from transformers import GPT2Tokenizer
 
@@ -161,7 +161,8 @@ class PromptLMRelationNet(nn.Module):
             if "roberat" in self.model_name:
                 raw_embeds = self.encoder.module.roberta.embeddings.word_embeddings(input_ids)
             elif "gpt" in self.model_name:
-                raw_embeds = self.encoder.module.transformer.wte(input_ids)
+                with torch.no_grad():
+                    raw_embeds = self.encoder.module.transformer.wte(input_ids)
             bs = raw_embeds.shape[0]
 
             # (num_prompt, embed_size)
@@ -240,3 +241,68 @@ class PromptLMRelationNet(nn.Module):
             f'Verbalization {word} is mapped to a special token {tokenizer.convert_ids_to_tokens(verbalization_id)}'
         assert verbalization_id != tokenizer.unk_token_id, "verbalization was tokenized as <UNK>"
         return verbalization_id
+
+class PromptWithClassifyLMRelationNet(nn.Module):
+    def __init__(self, args, model_name, label_list_len, from_checkpoint,
+                 concept_num, concept_dim, relation_num, relation_dim, concept_in_dim, hidden_size, num_hidden_layers,
+                 prompt_token_num, fc_size, num_fc_layers, dropout, pretrained_concept_emb=None,
+                 pretrained_relation_emb=None, freeze_ent_emb=True, init_range=0, ablation=None,
+                 use_contextualized=False, emb_scale=1.0, encoder_config={}):
+        super().__init__()
+        self.args = args
+        self.model_name = model_name
+        self.use_contextualized = use_contextualized
+        self.label_list = [0, 1]
+        self.verbalize = {0: ["No"], 1: ["Yes"]}
+        self.max_num_verbalizers = 1
+        self.encoder = PromptTextEncoder(model_name, label_list_len, from_checkpoint=from_checkpoint)
+
+
+        self.prompt_token_num = prompt_token_num
+        self.kg_enc_out_size = self.encoder.sent_dim * prompt_token_num
+
+        self.decoder = SoftPromptEncoder(args=self.args, init_range=init_range, embed_size=self.encoder.sent_dim)
+
+
+        self.classify_head = ClassifyMLPHead(input_size=self.encoder.sent_dim, output_size=1, init_range=init_range)
+
+
+    def forward(self, *inputs, prompt_data, sample_ids=None, type=None):
+        inputs = [x.view(x.size(0) * x.size(1), *x.size()[2:]) for x in inputs]  # merge the batch dimension and the num_choice dimension
+
+        input_ids, input_mask, segment_ids, output_mask = inputs
+
+        prompt_data = [x.view(x.size(0) * x.size(1), *x.size()[2:]) for x in prompt_data]
+        block_flag, mlm_mask, mlm_label = prompt_data # (bs*5, max_seq_len) (bs*5, 1)
+
+        with torch.no_grad():
+            if "roberat" in self.model_name:
+                raw_embeds = self.encoder.module.roberta.embeddings.word_embeddings(input_ids)
+            elif "gpt" in self.model_name:
+                raw_embeds = self.encoder.module.wte(input_ids)
+        bs = raw_embeds.shape[0]
+
+        # (num_prompt, embed_size)
+        device = raw_embeds.device
+        replace_embeds = self.decoder(device)
+        if replace_embeds.shape[-1] != raw_embeds.shape[-1]:
+            print("the dim of soft prompt {} and raw embeddings {} is different".format(replace_embeds.shape[-1],
+                                                                                        raw_embeds.shape[-1]))
+
+        blocked_indices = (block_flag == 1).nonzero().reshape((-1, self.prompt_token_num, 2))[:, :, 1]
+
+        for bidx in range(bs):
+            for i in range(blocked_indices.shape[1]):
+                raw_embeds[bidx, blocked_indices[bidx, i], :] = replace_embeds[i, :]
+
+        inputs = {'inputs_embeds': raw_embeds, 'attention_mask': input_mask}
+
+        outputs = self.encoder(inputs_embeds=inputs['inputs_embeds'],
+                               attention_mask=inputs['attention_mask'],
+                               token_type_ids=None)
+
+        hidden_states = outputs[0]  # (bs*5, max_len, hid_dim)
+        masked_hidden_state = hidden_states[mlm_mask == 1]  # (bs*5, hid_dim)
+        cls_logits = self.classify_head(masked_hidden_state) # (bs*5, 1)
+        cls_logits = cls_logits.view(-1, 5)
+        return cls_logits, None

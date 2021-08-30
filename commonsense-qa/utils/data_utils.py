@@ -498,7 +498,6 @@ def load_gpt_input_tensors(statement_jsonl_path, max_seq_length, prompt_token_nu
             input_ids[batch, alternative, :] = [start_token] + story[:cap_length] + [delimiter_token] + cont1[:cap_length] + [clf_token]
         """
         features = []
-        # for dataset in encoded_datasets:
         n_batch = len(dataset)
         for i, sample in enumerate(dataset):
             choices_features = []
@@ -507,6 +506,7 @@ def load_gpt_input_tensors(statement_jsonl_path, max_seq_length, prompt_token_nu
 
             for j in range(len(choices)):
                 c = choices[j]
+                #### format: _ _ _ q c _ _ _ ####
                 q = " Question: " + q
                 c = " Answer: " + c
                 context = q + c
@@ -516,8 +516,21 @@ def load_gpt_input_tensors(statement_jsonl_path, max_seq_length, prompt_token_nu
                 _truncate_seq_pair(tokens_q, tokens_c, max_seq_length - special_tokens_count)
                 qc_tokens = tokens_q + tokens_c
                 qc_tokens_ids = tokenizer.convert_tokens_to_ids(qc_tokens)
-
                 input_ids = [prompt_token_ids]*(int(prompt_token_num/2)) + qc_tokens_ids + [prompt_token_ids]*(int(prompt_token_num/2))
+
+                #### format: _ _ _ q _ _ _ c _ _ _ ####
+                # q = "Question: " + q
+                # c = "Answer: " + c
+                # # context = q + c
+                # special_tokens_count = prompt_token_num
+                # tokens_q = tokenizer.tokenize(q)
+                # tokens_c = tokenizer.tokenize(c)
+                # _truncate_seq_pair(tokens_q, tokens_c, max_seq_length - special_tokens_count)
+                # tokens_q = tokenizer.convert_tokens_to_ids(tokens_q)
+                # tokens_c = tokenizer.convert_tokens_to_ids(tokens_c)
+                # qc_tokens = tokens_q + tokens_c
+                # qc_tokens_ids = tokenizer.convert_tokens_to_ids(qc_tokens)
+                # input_ids = [prompt_token_ids]*(int(prompt_token_num/3)) + tokens_q + [prompt_token_ids]*(int(prompt_token_num/3)) + tokens_c + [prompt_token_ids]*(int(prompt_token_num/3))
 
                 input_mask = [1]*len(input_ids)
                 prompt_token_idx = [index for index, id in enumerate(input_ids) if id == prompt_token_ids]

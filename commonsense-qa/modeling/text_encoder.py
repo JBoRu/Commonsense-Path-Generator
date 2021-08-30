@@ -30,10 +30,15 @@ MODEL_CLASSES_PROMPT = {
         'tokenizer': AlbertTokenizer,
         'model': AlbertForMaskedLM
     },
+    # 'gpt': {
+    #     'config': GPT2Config,
+    #     'tokenizer': GPT2Tokenizer,
+    #     'model': GPT2LMHeadModel
+    # },
     'gpt': {
         'config': GPT2Config,
         'tokenizer': GPT2Tokenizer,
-        'model': GPT2LMHeadModel
+        'model': GPT2Model
     }
 }
 
@@ -244,3 +249,25 @@ class PromptTextEncoder(nn.Module):
     #         sent_vecs = hidden_states[:, 0]
     #     return sent_vecs, all_hidden_states
     #
+
+class ClassifyMLPHead(nn.Module):
+    def __init__(self, input_size, output_size, init_range):
+        super(ClassifyMLPHead, self).__init__()
+        self.init_range = init_range
+        self.classify_head = nn.Linear(input_size, output_size, bias=False)
+
+        if self.init_range > 0:
+            self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        if isinstance(module, (nn.Linear, nn.Embedding)):
+            module.weight.data.normal_(mean=0.0, std=self.init_range)
+            if isinstance(module, nn.Linear) and module.bias is not None:
+                module.bias.data.zero_()
+        elif isinstance(module, nn.LayerNorm):
+            module.bias.data.zero_()
+            module.weight.data.fill_(1.0)
+
+    def forward(self, input):
+        output = self.classify_head(input) # (bs, 1)
+        return output

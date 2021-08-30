@@ -272,7 +272,7 @@ class SoftPromptEncoder(nn.Module):
                                        num_layers=2,
                                        bidirectional=True,
                                        batch_first=True)
-        self.mlp_head = nn.Sequential(nn.Linear(self.hidden_size, self.hidden_size),
+        self.mlp_head = nn.Sequential(nn.Linear(self.hidden_size*2, self.hidden_size),
                                       nn.ReLU(),
                                       nn.Linear(self.hidden_size, self.hidden_size))
 
@@ -293,14 +293,22 @@ class SoftPromptEncoder(nn.Module):
             torch.LongTensor(list(range(self.prompt_token_num))).to(device)) # (num_promt_token, embed_size)
         replace_embeds = replace_embeds.unsqueeze(0) # (1, num_promt_token, embed_size)
 
-        # if self.args.encoder == "gpt2":
-        #     sep = int(self.prompt_token_num/2)
-        #     replace_embeds_1 = self.lstm_head(replace_embeds[:, 0:sep, :])[0]
-        #     replace_embeds_2 = self.lstm_head(replace_embeds[:, sep:,:])[0]
-        #     replace_embeds = torch.cat((replace_embeds_1, replace_embeds_2), dim=1)
-        # else:
-        #     replace_embeds = self.lstm_head(replace_embeds)[0]  # [1, num_promt_token, 2 * hidden_dim]
-        #
+        if self.args.encoder == "gpt2":
+            ### _ _ _ q c _ _ _ ###
+            sep = int(self.prompt_token_num/2)
+            replace_embeds_1 = self.lstm_head(replace_embeds[:, 0:sep, :])[0]
+            replace_embeds_2 = self.lstm_head(replace_embeds[:, sep:,:])[0]
+            replace_embeds = torch.cat((replace_embeds_1, replace_embeds_2), dim=1)
+
+            ### _ _ _ q _ _ _ c _ _ _###
+            # sep = int(self.prompt_token_num/3)
+            # replace_embeds_1 = self.lstm_head(replace_embeds[:, 0:sep, :])[0]
+            # replace_embeds_2 = self.lstm_head(replace_embeds[:, sep:int(2*sep),:])[0]
+            # replace_embeds_3 = self.lstm_head(replace_embeds[:, int(2*sep):, :])[0]
+            # replace_embeds = torch.cat((replace_embeds_1, replace_embeds_2, replace_embeds_3), dim=1)
+        else:
+            replace_embeds = self.lstm_head(replace_embeds)[0]  # [1, num_promt_token, 2 * hidden_dim]
+
         if self.prompt_token_num == 1:
             replace_embeds = self.mlp_head(replace_embeds) # [1, 2, hid_dim]
         else:

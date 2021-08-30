@@ -3,7 +3,7 @@ import random
 from transformers import *
 
 from modeling.kg_encoder import *
-from modeling.models import LMRelationNet, PromptLMRelationNet
+from modeling.models import LMRelationNet, PromptLMRelationNet, PromptWithClassifyLMRelationNet
 from modeling.data_loader import *
 from utils.optimization_utils import OPTIMIZER_CLASSES
 from utils.parser_utils import *
@@ -39,6 +39,17 @@ def evaluate_accuracy_prompt(eval_set, model, type=None):
             logits, _ = model(*input_data, prompt_data=prompt_data, sample_ids=sample_ids, type=type)
             logits = logits[:, 1:2] # (bs*5) get the logit of YES
             logits = logits.view(-1, 5) # (bs, 5)
+            n_correct += (logits.argmax(1) == labels).sum().item()
+            n_samples += labels.size(0)
+    return n_correct / n_samples
+
+def evaluate_accuracy_prompt_with_classify_head(eval_set, model, type=None):
+    n_samples, n_correct = 0, 0
+    model.eval()
+    with torch.no_grad():
+        for sample_ids, qids, labels, *input_data,  prompt_data in eval_set:
+            # (bs*5, 2)
+            logits, _ = model(*input_data, prompt_data=prompt_data, sample_ids=sample_ids, type=type)
             n_correct += (logits.argmax(1) == labels).sum().item()
             n_samples += labels.size(0)
     return n_correct / n_samples
@@ -84,12 +95,18 @@ def freeze_and_unfreeze_net(model, args):
     if args.freeze_dec: # refer to decoder embeddings
         if args.input_format in ['soft-prompt','p-tuning-GPT']:
             freeze_net(model.decoder)
+        elif args.input_format in ['p-tuning-GPT-classify']:
+            freeze_net(model.decoder)
+            freeze_net(model.classify_head)
         else:
             freeze_net(model.decoder.rel_emb)
             freeze_net(model.decoder.concept_emb)
     else:
         if args.input_format in ['soft-prompt','p-tuning-GPT']:
             unfreeze_net(model.decoder)
+        elif args.input_format in ['p-tuning-GPT-classify']:
+            unfreeze_net(model.decoder)
+            unfreeze_net(model.classify_head)
         else:
             unfreeze_net(model.decoder.rel_emb)
             unfreeze_net(model.decoder.concept_emb)
@@ -172,6 +189,22 @@ def train(args):
                           init_range=args.init_range, ablation=args.ablation, use_contextualized=use_contextualized,
                           emb_scale=args.emb_scale)
         freeze_and_unfreeze_net(model, args)
+    elif args.input_format in ['p-tuning-GPT-classify']:
+        model = PromptWithClassifyLMRelationNet(args=args, model_name=args.encoder, label_list_len=2,
+                                    from_checkpoint=args.from_checkpoint,
+                                    concept_num=concept_num, concept_dim=relation_dim,
+                                    relation_num=relation_num, relation_dim=relation_dim,
+                                    concept_in_dim=(
+                                        dataset.get_node_feature_dim() if use_contextualized else concept_dim),
+                                    hidden_size=args.mlp_dim, num_hidden_layers=args.mlp_layer_num,
+                                    prompt_token_num=args.prompt_token_num,
+                                    fc_size=args.fc_dim, num_fc_layers=args.fc_layer_num, dropout=args.dropoutm,
+                                    pretrained_concept_emb=cp_emb, pretrained_relation_emb=rel_emb,
+                                    freeze_ent_emb=args.freeze_ent_emb,
+                                    init_range=args.init_range, ablation=args.ablation,
+                                    use_contextualized=use_contextualized,
+                                    emb_scale=args.emb_scale)
+        freeze_and_unfreeze_net(model, args)
     elif args.input_format == 'path-generate':
         model = LMRelationNet(model_name=args.encoder, from_checkpoint=args.from_checkpoint, concept_num=concept_num, concept_dim=relation_dim,
                           relation_num=relation_num, relation_dim=relation_dim,
@@ -192,16 +225,32 @@ def train(args):
         return
 
     no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
-    grouped_parameters = [
-        {'params': [p for n, p in model.encoder.named_parameters() if not any(nd in n for nd in no_decay)],
-         'weight_decay': args.weight_decay, 'lr': args.encoder_lr},
-        {'params': [p for n, p in model.encoder.named_parameters() if any(nd in n for nd in no_decay)],
-         'weight_decay': 0.0, 'lr': args.encoder_lr},
-        {'params': [p for n, p in model.decoder.named_parameters() if not any(nd in n for nd in no_decay)],
-         'weight_decay': args.weight_decay, 'lr': args.decoder_lr},
-        {'params': [p for n, p in model.decoder.named_parameters() if any(nd in n for nd in no_decay)],
-         'weight_decay': 0.0, 'lr': args.decoder_lr},
-    ]
+    if args.input_format in ['p-tuning-GPT-classify']:
+        grouped_parameters = [
+            {'params': [p for n, p in model.encoder.named_parameters() if not any(nd in n for nd in no_decay)],
+             'weight_decay': args.weight_decay, 'lr': args.encoder_lr},
+            {'params': [p for n, p in model.encoder.named_parameters() if any(nd in n for nd in no_decay)],
+             'weight_decay': 0.0, 'lr': args.encoder_lr},
+            {'params': [p for n, p in model.decoder.named_parameters() if not any(nd in n for nd in no_decay)],
+             'weight_decay': args.weight_decay, 'lr': args.decoder_lr},
+            {'params': [p for n, p in model.decoder.named_parameters() if any(nd in n for nd in no_decay)],
+             'weight_decay': 0.0, 'lr': args.decoder_lr},
+            {'params': [p for n, p in model.classify_head.named_parameters() if not any(nd in n for nd in no_decay)],
+             'weight_decay': args.weight_decay, 'lr': args.decoder_lr},
+            {'params': [p for n, p in model.classify_head.named_parameters() if any(nd in n for nd in no_decay)],
+             'weight_decay': 0.0, 'lr': args.decoder_lr}
+        ]
+    else:
+        grouped_parameters = [
+            {'params': [p for n, p in model.encoder.named_parameters() if not any(nd in n for nd in no_decay)],
+             'weight_decay': args.weight_decay, 'lr': args.encoder_lr},
+            {'params': [p for n, p in model.encoder.named_parameters() if any(nd in n for nd in no_decay)],
+             'weight_decay': 0.0, 'lr': args.encoder_lr},
+            {'params': [p for n, p in model.decoder.named_parameters() if not any(nd in n for nd in no_decay)],
+             'weight_decay': args.weight_decay, 'lr': args.decoder_lr},
+            {'params': [p for n, p in model.decoder.named_parameters() if any(nd in n for nd in no_decay)],
+             'weight_decay': 0.0, 'lr': args.decoder_lr},
+        ]
 
     optimizer = OPTIMIZER_CLASSES[args.optim](grouped_parameters)
     if args.lr_schedule == 'fixed':
@@ -272,7 +321,7 @@ def train(args):
                 elif args.loss == 'cross_entropy':
                     if args.input_format in ['p-tuning', 'hard-prompt', 'soft-prompt', 'p-tuning-GPT']:
                         loss = loss_func(logits, mlm_labels) # (bs, 2) (bs)
-                    elif args.input_format == 'path-generate':
+                    elif args.input_format in ['path-generate', 'p-tuning-GPT-classify']:
                         loss = loss_func(logits, labels[a:b])
 
                 loss = loss * (b - a) / bs
@@ -301,6 +350,9 @@ def train(args):
         if args.input_format in ['p-tuning', 'hard-prompt', 'soft-prompt', 'p-tuning-GPT']:
             dev_acc = evaluate_accuracy_prompt(dataset.dev(), model, type='dev')
             test_acc = evaluate_accuracy_prompt(dataset.test(), model, type='test') if dataset.test_size() > 0 else 0.0
+        elif args.input_format in ['p-tuning-GPT-classify']:
+            dev_acc = evaluate_accuracy_prompt_with_classify_head(dataset.dev(), model, type='dev')
+            test_acc = evaluate_accuracy_prompt_with_classify_head(dataset.test(), model, type='test') if dataset.test_size() > 0 else 0.0
         elif args.input_format == 'path-generate':
             dev_acc = evaluate_accuracy(dataset.dev(), model)
             test_acc = evaluate_accuracy(dataset.test(), model) if dataset.test_size() > 0 else 0.0
