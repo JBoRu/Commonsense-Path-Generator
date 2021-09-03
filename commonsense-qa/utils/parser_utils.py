@@ -109,7 +109,7 @@ def add_optimization_arguments(parser):
     parser.add_argument('--max_grad_norm', default=1.0, type=float, help='max grad norm (0 to disable)')
     parser.add_argument('--weight_decay', default=1e-2, type=float, help='l2 weight decay strength')
     parser.add_argument('--n_epochs', default=100, type=int, help='total number of training epochs to perform.')
-    parser.add_argument('-me', '--max_epochs_before_stop', default=2, type=int, help='stop training if dev does not increase for N epochs')
+    parser.add_argument('-me', '--max_epochs_before_stop', default=3, type=int, help='stop training if dev does not increase for N epochs')
 
 
 def add_additional_arguments(parser):
@@ -187,6 +187,11 @@ def get_parser():
     parser.add_argument('--init_range', default=0.02, type=float,
                         help='stddev when initializing with normal distribution')
     parser.add_argument('--emb_scale', default=1.0, type=float, help='scale pretrained embeddings')
+    parser.add_argument('--lstm_split', default=0, type=int, help='whether to use lstm to model splited prompt tokems')
+    parser.add_argument('--pattern_type', default=0, type=int, help='input pattern format')
+    parser.add_argument('--using_lstm_mlp', default=1, type=int, help='wether to use lstm and mlp to model prompt tokens')
+
+
 
     # regularization
     parser.add_argument('--dropoutm', type=float, default=0.3, help='dropout for mlp hidden units (0 = no dropout')

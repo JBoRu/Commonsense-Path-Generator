@@ -449,7 +449,7 @@ def construct_prompt_with_input(dataset):
     return prompt_dataset
 
 
-def load_gpt_input_tensors(statement_jsonl_path, max_seq_length, prompt_token_num):
+def load_gpt_input_tensors(model_name, pattern_type, statement_jsonl_path, max_seq_length, prompt_token_num):
     class InputFeatures(object):
 
         def __init__(self, example_id, choices_features, label):
@@ -506,47 +506,81 @@ def load_gpt_input_tensors(statement_jsonl_path, max_seq_length, prompt_token_nu
 
             for j in range(len(choices)):
                 c = choices[j]
-                #### format: _ _ _ q c _ _ _ ####
-                q = " Question: " + q
-                c = " Answer: " + c
-                context = q + c
-                special_tokens_count = prompt_token_num
-                tokens_q = tokenizer.tokenize(q)
-                tokens_c = tokenizer.tokenize(c)
-                _truncate_seq_pair(tokens_q, tokens_c, max_seq_length - special_tokens_count)
-                qc_tokens = tokens_q + tokens_c
-                qc_tokens_ids = tokenizer.convert_tokens_to_ids(qc_tokens)
-                input_ids = [prompt_token_ids]*(int(prompt_token_num/2)) + qc_tokens_ids + [prompt_token_ids]*(int(prompt_token_num/2))
-
+                ### format: _ _ _ q c _ _ _ ####
+                if pattern_type == 0:
+                    if i == 0:
+                        print("Using pattern of _ _ _ q c _ _ _")
+                    q = "Question: " + q
+                    c = " Answer: " + c
+                    context = q + c
+                    special_tokens_count = prompt_token_num
+                    tokens_q = tokenizer.tokenize(q)
+                    tokens_c = tokenizer.tokenize(c)
+                    _truncate_seq_pair(tokens_q, tokens_c, max_seq_length - special_tokens_count)
+                    qc_tokens = tokens_q + tokens_c
+                    qc_tokens_ids = tokenizer.convert_tokens_to_ids(qc_tokens)
+                    input_ids = [prompt_token_ids]*(int(prompt_token_num/2)) + qc_tokens_ids + [prompt_token_ids]*(int(prompt_token_num/2))
                 #### format: _ _ _ q _ _ _ c _ _ _ ####
-                # q = "Question: " + q
-                # c = "Answer: " + c
-                # # context = q + c
-                # special_tokens_count = prompt_token_num
-                # tokens_q = tokenizer.tokenize(q)
-                # tokens_c = tokenizer.tokenize(c)
-                # _truncate_seq_pair(tokens_q, tokens_c, max_seq_length - special_tokens_count)
-                # tokens_q = tokenizer.convert_tokens_to_ids(tokens_q)
-                # tokens_c = tokenizer.convert_tokens_to_ids(tokens_c)
-                # qc_tokens = tokens_q + tokens_c
-                # qc_tokens_ids = tokenizer.convert_tokens_to_ids(qc_tokens)
-                # input_ids = [prompt_token_ids]*(int(prompt_token_num/3)) + tokens_q + [prompt_token_ids]*(int(prompt_token_num/3)) + tokens_c + [prompt_token_ids]*(int(prompt_token_num/3))
+                elif pattern_type == 1:
+                    if i == 0:
+                        print("Using pattern of _ _ _ q _ _ _ c _ _ _")
+                    q = "Question: " + q
+                    c = "Answer: " + c
+                    # context = q + c
+                    special_tokens_count = prompt_token_num
+                    tokens_q = tokenizer.tokenize(q)
+                    tokens_c = tokenizer.tokenize(c)
+                    _truncate_seq_pair(tokens_q, tokens_c, max_seq_length - special_tokens_count)
+                    tokens_q = tokenizer.convert_tokens_to_ids(tokens_q)
+                    tokens_c = tokenizer.convert_tokens_to_ids(tokens_c)
+                    qc_tokens = tokens_q + tokens_c
+                    qc_tokens_ids = tokenizer.convert_tokens_to_ids(qc_tokens)
+                    input_ids = [prompt_token_ids]*(int(prompt_token_num/3)) + tokens_q + [prompt_token_ids]*(int(prompt_token_num/3)) + tokens_c + [prompt_token_ids]*(int(prompt_token_num/3))
+                #### format: start _ _ _ q c _ _ _ answer ####
+                elif pattern_type == 2:
+                    if i == 0:
+                        print("Using pattern of start _ _ _ q c _ _ _ answer")
+                    q = "Question: " + q
+                    c = " Answer: " + c
+                    context = q + c
+                    special_tokens_count = prompt_token_num
+                    tokens_q = tokenizer.tokenize(q)
+                    tokens_c = tokenizer.tokenize(c)
+                    _truncate_seq_pair(tokens_q, tokens_c, max_seq_length - special_tokens_count)
+                    qc_tokens = tokens_q + tokens_c
+                    qc_tokens_ids = tokenizer.convert_tokens_to_ids(qc_tokens)
+                    pos_label_ids = tokenizer.convert_tokens_to_ids(tokenizer.tokenize("Yes"))
+                    neg_label_ids = tokenizer.convert_tokens_to_ids(tokenizer.tokenize("No"))
+                    mlm_label = 1 if j == int(mc_label) else 0
+                    # start _ _ _ q c _ _ _ answer
+                    if mlm_label:
+                        input_ids = qc_tokens_ids[0:1] + [prompt_token_ids]*(int(prompt_token_num/2)) + qc_tokens_ids + \
+                                    [prompt_token_ids]*(int(prompt_token_num/2)) + pos_label_ids
+                    else:
+                        input_ids = qc_tokens_ids[0:1] + [prompt_token_ids]*(int(prompt_token_num/2)) + qc_tokens_ids + \
+                                    [prompt_token_ids] * (int(prompt_token_num/2)) + neg_label_ids
+
 
                 input_mask = [1]*len(input_ids)
                 prompt_token_idx = [index for index, id in enumerate(input_ids) if id == prompt_token_ids]
-                assert len(prompt_token_idx) == special_tokens_count
+                assert len(prompt_token_idx) == special_tokens_count, f"%d %d"%(len(prompt_token_idx),special_tokens_count)
                 block_flag = [0]*len(input_ids)
                 for idx in prompt_token_idx:
                     block_flag[idx] = 1 # 1 for prompt placeholder
                 mlm_mask = [0]*len(input_ids)
-                mlm_mask[-1] = 1
+                if pattern_type == 2:
+                    mlm_mask[-2] = 1
+                else:
+                    mlm_mask[-1] = 1
 
                 pad_length = max_seq_length - len(input_ids)
                 input_ids = input_ids + ([pad_token_ids]*pad_length)
                 input_mask = input_mask + ([0]*pad_length)
-                # note: i not use these two variable, only for consistent with input format of Roberta
+
+                # Note: i not use these two variable, only for consistent with input format of Roberta
                 output_mask = input_mask
                 segment_ids = input_mask
+
                 block_flag = block_flag + ([0] * pad_length)
                 mlm_mask = mlm_mask + ([0] * pad_length)
 
@@ -591,7 +625,13 @@ def load_gpt_input_tensors(statement_jsonl_path, max_seq_length, prompt_token_nu
         all_label = torch.tensor([f.label for f in features], dtype=torch.long)
         return all_input_ids, all_input_mask, all_segment_ids, all_output_mask, all_label, (all_block_flag, all_mlm_mask, all_mlm_label)
 
-    tokenizer = GPT2Tokenizer.from_pretrained('/mnt/nlp_model/huggingface/gpt2/')
+    if model_name == "gpt2-medium":
+        path = "/mnt/nlp_model/gpt2-medium/"
+    else:
+        path = "/mnt/nlp_model/huggingface/gpt2/"
+
+    print("Load tokenizer from %s" % (path))
+    tokenizer = GPT2Tokenizer.from_pretrained(path)
     tokenizer.add_tokens(GPT_SPECIAL_TOKENS)
     special_tokens_ids = tokenizer.convert_tokens_to_ids(GPT_SPECIAL_TOKENS)
     PROMPT, PAD, END, SEP = special_tokens_ids
@@ -662,7 +702,7 @@ def load_bert_xlnet_roberta_input_tensors(args, statement_jsonl_path, model_type
                     ))
         return examples
 
-    def convert_examples_to_features(examples, label_list, max_seq_length,
+    def convert_examples_to_features(pattern_type, examples, label_list, max_seq_length,
                                      tokenizer,
                                      cls_token_at_end=False,
                                      cls_token='[CLS]',
@@ -692,7 +732,7 @@ def load_bert_xlnet_roberta_input_tensors(args, statement_jsonl_path, model_type
             # for one sample
             for ending_idx, (context, ending) in enumerate(zip(example.contexts, example.endings)):
                 # experiment with p-tuning format!
-                if args.input_format in ['p-tuning', 'p-tuning-GPT']:
+                if args.input_format in ['pg_kg_enc_as_prompt', 'GPT_kg_generator_as_prompt']:
                     kg_prefix = "According to: "
                     kg = [mask_token for i in range(num_prompt_token)]
                     kg = " ".join(kg)
@@ -708,7 +748,7 @@ def load_bert_xlnet_roberta_input_tensors(args, statement_jsonl_path, model_type
                 elif args.input_format == 'path-gen':
                     tokens_a = tokenizer.tokenize(context)
                     tokens_b = tokenizer.tokenize(example.question + " " + ending)
-                elif args.input_format == 'hard-prompt':
+                elif args.input_format == 'manual_hard_prompt':
                     context = "Question: " + context  # context is question
                     ending = " Is it " + ending + "?"  # ending is choice
                     masked = " " + mask_token + ", it is!"
@@ -718,14 +758,36 @@ def load_bert_xlnet_roberta_input_tensors(args, statement_jsonl_path, model_type
                     # print("Debug: sentence a is ", sen_a)
                     # print("Debug: tokenized sentence a is ", tokens_a)
                     tokens_b = []
-                elif args.input_format == 'soft-prompt':
-                    context = "Question: " + context  # context is question
-                    ending = " Is it " + ending + "?"  # ending is choice
-                    soft_prompt = [mask_token for i in range(num_prompt_token)]
-                    soft_prompt = " ".join(soft_prompt)
-                    soft_prompt = " " + soft_prompt
-                    masked = " " + mask_token + ", it is!"
-                    sen_a = context + ending + soft_prompt + masked
+                elif args.input_format == 'soft_prompt_p_tuning':
+                    if pattern_type == 0:
+                        if ex_index == ending_idx == 0:
+                            print("Using input pattern of 'Question: q Is it c? p1 p2 p3 p4 p5 p6 [mask]' ")
+                        context = "Question: " + context  # context is question
+                        ending = " Is it " + ending + "?"  # ending is choice
+                        soft_prompt = [mask_token for i in range(num_prompt_token)]
+                        soft_prompt = " ".join(soft_prompt)
+                        soft_prompt = " " + soft_prompt
+                        masked = " " + mask_token + ", it is!"
+                        sen_a = context + ending + soft_prompt + masked
+                    elif pattern_type == 1:
+                        if ex_index == ending_idx == 0:
+                            print("Using input pattern of 'p1 p2 p3 Question: q Answer: c p4 p5 p6 [mask]' ")
+                        context = "Question: " + context  # context is question
+                        ending = "Answer: " + ending  # ending is choice
+                        soft_prompt = [mask_token for i in range(int(num_prompt_token/2))]
+                        soft_prompt = " ".join(soft_prompt)
+                        # soft_prompt = " " + soft_prompt
+                        masked = " " + mask_token
+                        sen_a = soft_prompt + " " + context + " " + ending + " " + soft_prompt + masked
+                    elif pattern_type == 2:
+                        if ex_index == ending_idx == 0:
+                            print("Using input pattern of 'p1 p2 p3 Question: q Is it c? p4 p5 p6 [mask]' ")
+                        context = "Question: " + context  # context is question
+                        ending = "Is it " + ending + "?"  # ending is choice
+                        soft_prompt = [mask_token for i in range(int(num_prompt_token / 2))]
+                        soft_prompt = " ".join(soft_prompt)
+                        masked = " " + mask_token + ", it is!"
+                        sen_a = soft_prompt + " " + context + " " + ending + " " + soft_prompt + masked
 
                     tokens_a = tokenizer.tokenize(sen_a)
                     # print("Debug: sentence a is ", sen_a)
@@ -771,15 +833,15 @@ def load_bert_xlnet_roberta_input_tensors(args, statement_jsonl_path, model_type
                 # assert len(mask_token_index) == 3, "More than three masked position in one example"
                 block_flag = [0]*len(input_ids)
                 mlm_mask = [0]*len(input_ids)
-                if args.input_format in ['p-tuning', 'soft-prompt', 'p-tuning-GPT']:
+                if args.input_format in ['pg_kg_enc_as_prompt', 'soft_prompt_p_tuning', 'GPT_kg_generator_as_prompt']:
                     for idx in mask_token_index[0:-1]:
                         block_flag[idx] = 1  # 1 for prompt placeholder
                     mlm_mask[mask_token_index[-1]] = 1 # 1 for masked token
-                elif args.input_format == 'hard-prompt':
+                elif args.input_format == 'manual_hard_prompt':
                     if len(mask_token_index) == 1:
                         mlm_mask[mask_token_index[-1]] = 1  # 1 for masked token
                     else:
-                        print("There are more than 1 mask in hard-prompt format!")
+                        print("There are more than 1 mask in manual_hard_prompt format!")
 
 
                 # Zero-pad up to the sequence length.
@@ -847,7 +909,7 @@ def load_bert_xlnet_roberta_input_tensors(args, statement_jsonl_path, model_type
     tokenizer_class = {'bert': BertTokenizer, 'xlnet': XLNetTokenizer, 'roberta': RobertaTokenizer, 'albert': AlbertTokenizer}.get(model_type)
     tokenizer = tokenizer_class.from_pretrained(model_name, cache_dir='../cache/')
     examples = read_examples(statement_jsonl_path)
-    features = convert_examples_to_features(examples, list(range(len(examples[0].endings))), max_seq_length, tokenizer,
+    features = convert_examples_to_features(args.pattern_type, examples, list(range(len(examples[0].endings))), max_seq_length, tokenizer,
                                             cls_token_at_end=bool(model_type in ['xlnet']),  # xlnet has a cls token at the end
                                             cls_token=tokenizer.cls_token,
                                             sep_token=tokenizer.sep_token,
@@ -898,7 +960,7 @@ def load_input_tensors(args, input_jsonl_path, model_type, model_name, max_seq_l
     if model_type in ('lstm',):
         return load_lstm_input_tensors(input_jsonl_path, max_seq_length)
     elif model_type in ('gpt',):
-        return load_gpt_input_tensors(input_jsonl_path, max_seq_length, args.prompt_token_num)
+        return load_gpt_input_tensors(model_name, args.pattern_type, input_jsonl_path, max_seq_length, args.prompt_token_num)
     elif model_type in ('bert', 'xlnet', 'roberta', 'albert'):
         return load_bert_xlnet_roberta_input_tensors(args, input_jsonl_path, model_type, model_name, max_seq_length)
 

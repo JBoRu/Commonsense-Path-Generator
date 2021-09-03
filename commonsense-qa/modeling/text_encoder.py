@@ -30,16 +30,16 @@ MODEL_CLASSES_PROMPT = {
         'tokenizer': AlbertTokenizer,
         'model': AlbertForMaskedLM
     },
-    # 'gpt': {
-    #     'config': GPT2Config,
-    #     'tokenizer': GPT2Tokenizer,
-    #     'model': GPT2LMHeadModel
-    # },
     'gpt': {
         'config': GPT2Config,
         'tokenizer': GPT2Tokenizer,
-        'model': GPT2Model
-    }
+        'model': GPT2LMHeadModel
+    },
+    # 'gpt': {
+    #     'config': GPT2Config,
+    #     'tokenizer': GPT2Tokenizer,
+    #     'model': GPT2Model
+    # }
 }
 
 class LSTMTextEncoder(nn.Module):
@@ -94,7 +94,6 @@ class LSTMTextEncoder(nn.Module):
         if self.output_hidden_states:
             outputs = outputs + (all_hidden_states,)
         return outputs
-
 
 class TextEncoder(nn.Module):
     valid_model_types = set(MODEL_CLASS_TO_NAME.keys())
@@ -165,16 +164,23 @@ class TextEncoder(nn.Module):
 class PromptTextEncoder(nn.Module):
     valid_model_types = set(MODEL_CLASS_TO_NAME.keys())
 
-    def __init__(self, model_name, label_list_len, from_checkpoint=None):
+    def __init__(self, args, model_name, label_list_len, from_checkpoint=None):
         super().__init__()
         self.model_type = MODEL_NAME_TO_CLASS[model_name]
         self.model_dict = MODEL_CLASSES_PROMPT[self.model_type]
+        if args.input_format == "p-tuning-GPT-classify":
+            print("Using GPT2Model for mlp classify")
+            self.model_dict['model'] = GPT2Model
+
         print("Loading plm config....")
         config_class = self.model_dict['config']
         if self.model_type == 'roberta':
             path = "/mnt/nlp_model/huggingface/roberta-large/"
         elif self.model_type == 'gpt':
-            path = "/mnt/nlp_model/huggingface/gpt2/"
+            if model_name == 'gpt2':
+                path = "/mnt/nlp_model/huggingface/gpt2/"
+            elif model_name == 'gpt2-medium':
+                path = "/mnt/nlp_model/gpt2-medium/"
 
         model_config = config_class.from_pretrained(path, num_labels=label_list_len)
 
@@ -217,38 +223,6 @@ class PromptTextEncoder(nn.Module):
             return self.module(inputs_embeds=inputs_embeds,
                               attention_mask=attention_mask,
                               token_type_ids=token_type_ids)
-
-    # def forward(self, *inputs, layer_id=-1):
-    #     '''
-    #     layer_id: only works for non-LSTM encoders
-    #     output_token_states: if True, return hidden states of specific layer and attention masks
-    #     '''
-    #
-    #     if self.model_type in ('lstm',):  # lstm
-    #         input_ids, lengths = inputs
-    #         outputs = self.module(input_ids, lengths)
-    #     elif self.model_type in ('gpt',):  # gpt
-    #         input_ids, cls_token_ids, lm_labels = inputs  # lm_labels is not used
-    #         outputs = self.module(input_ids)
-    #     else:  # bert / xlnet / roberta
-    #         input_ids, attention_mask, token_type_ids, output_mask = inputs
-    #         outputs = self.module(input_ids, token_type_ids=token_type_ids, attention_mask=attention_mask)
-    #     all_hidden_states = outputs[-1]
-    #     hidden_states = all_hidden_states[layer_id]
-    #
-    #     if self.model_type in ('lstm',):
-    #         sent_vecs = outputs[1]
-    #     elif self.model_type in ('gpt',):
-    #         cls_token_ids = cls_token_ids.view(-1).unsqueeze(-1).unsqueeze(-1).expand(-1, 1, hidden_states.size(-1))
-    #         sent_vecs = hidden_states.gather(1, cls_token_ids).squeeze(1)
-    #     elif self.model_type in ('xlnet',):
-    #         sent_vecs = hidden_states[:, -1]
-    #     else:
-    #         if self.output_token_states:
-    #             return hidden_states, output_mask
-    #         sent_vecs = hidden_states[:, 0]
-    #     return sent_vecs, all_hidden_states
-    #
 
 class ClassifyMLPHead(nn.Module):
     def __init__(self, input_size, output_size, init_range):

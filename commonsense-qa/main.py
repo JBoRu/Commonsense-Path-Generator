@@ -1,9 +1,10 @@
 import random
 
+import torch
 from transformers import *
 
 from modeling.kg_encoder import *
-from modeling.models import LMRelationNet, PromptLMRelationNet, PromptWithClassifyLMRelationNet
+from modeling.models import LMRelationNet, PromptLMRelationNet, PromptWithClassifyLMRelationNet, PromptWithGenerateLMRelationNet
 from modeling.data_loader import *
 from utils.optimization_utils import OPTIMIZER_CLASSES
 from utils.parser_utils import *
@@ -54,6 +55,20 @@ def evaluate_accuracy_prompt_with_classify_head(eval_set, model, type=None):
             n_samples += labels.size(0)
     return n_correct / n_samples
 
+def evaluate_accuracy_prompt_with_generate(eval_set, model, type=None):
+    n_samples, n_correct = 0, 0
+    model.eval()
+    with torch.no_grad():
+        for sample_ids, qids, labels, *input_data,  prompt_data in eval_set:
+            # (bs*5, 2)
+            predict_logits, target_ids, label_mask, eval_logits = model(*input_data, prompt_data=prompt_data, sample_ids=sample_ids, type=type)
+            logits = eval_logits
+            logits = logits[:, 1:2]  # (bs*5) get the logit of YES
+            logits = logits.view(-1, 5)  # (bs, 5)
+            n_correct += (logits.argmax(1) == labels).sum().item()
+            n_samples += labels.size(0)
+    return n_correct / n_samples
+
 def pred_to_file(eval_set, model, output_path):
     model.eval()
     fw = open(output_path, 'w')
@@ -93,7 +108,7 @@ def freeze_and_unfreeze_net(model, args):
         unfreeze_net(model.encoder)
 
     if args.freeze_dec: # refer to decoder embeddings
-        if args.input_format in ['soft-prompt','p-tuning-GPT']:
+        if args.input_format in ['soft_prompt_p_tuning','GPT_kg_generator_as_prompt', 'p-tuning-GPT-generate']:
             freeze_net(model.decoder)
         elif args.input_format in ['p-tuning-GPT-classify']:
             freeze_net(model.decoder)
@@ -102,7 +117,7 @@ def freeze_and_unfreeze_net(model, args):
             freeze_net(model.decoder.rel_emb)
             freeze_net(model.decoder.concept_emb)
     else:
-        if args.input_format in ['soft-prompt','p-tuning-GPT']:
+        if args.input_format in ['soft_prompt_p_tuning','GPT_kg_generator_as_prompt', 'p-tuning-GPT-generate']:
             unfreeze_net(model.decoder)
         elif args.input_format in ['p-tuning-GPT-classify']:
             unfreeze_net(model.decoder)
@@ -178,7 +193,7 @@ def train(args):
     ###################################################################################################
 
     lstm_config = get_lstm_config_from_args(args)
-    if args.input_format in ['p-tuning', 'hard-prompt', 'soft-prompt', 'p-tuning-GPT']:
+    if args.input_format in ['pg_kg_enc_as_prompt', 'manual_hard_prompt', 'soft_prompt_p_tuning', 'GPT_kg_generator_as_prompt']:
         model = PromptLMRelationNet(args=args, model_name=args.encoder, label_list_len=2, from_checkpoint=args.from_checkpoint,
                           concept_num=concept_num, concept_dim=relation_dim,
                           relation_num=relation_num, relation_dim=relation_dim,
@@ -191,6 +206,22 @@ def train(args):
         freeze_and_unfreeze_net(model, args)
     elif args.input_format in ['p-tuning-GPT-classify']:
         model = PromptWithClassifyLMRelationNet(args=args, model_name=args.encoder, label_list_len=2,
+                                    from_checkpoint=args.from_checkpoint,
+                                    concept_num=concept_num, concept_dim=relation_dim,
+                                    relation_num=relation_num, relation_dim=relation_dim,
+                                    concept_in_dim=(
+                                        dataset.get_node_feature_dim() if use_contextualized else concept_dim),
+                                    hidden_size=args.mlp_dim, num_hidden_layers=args.mlp_layer_num,
+                                    prompt_token_num=args.prompt_token_num,
+                                    fc_size=args.fc_dim, num_fc_layers=args.fc_layer_num, dropout=args.dropoutm,
+                                    pretrained_concept_emb=cp_emb, pretrained_relation_emb=rel_emb,
+                                    freeze_ent_emb=args.freeze_ent_emb,
+                                    init_range=args.init_range, ablation=args.ablation,
+                                    use_contextualized=use_contextualized,
+                                    emb_scale=args.emb_scale)
+        freeze_and_unfreeze_net(model, args)
+    elif args.input_format in ['p-tuning-GPT-generate']:
+        model = PromptWithGenerateLMRelationNet(args=args, model_name=args.encoder, label_list_len=2,
                                     from_checkpoint=args.from_checkpoint,
                                     concept_num=concept_num, concept_dim=relation_dim,
                                     relation_num=relation_num, relation_dim=relation_dim,
@@ -306,9 +337,13 @@ def train(args):
             for a in range(0, bs, args.mini_batch_size):
                 b = min(a + args.mini_batch_size, bs)
                 if args.input_format == 'path-generate':
-                    logits, _ = model(*[x[a:b] for x in input_data], layer_id=args.encoder_layer)
+                      logits, _ = model(*[x[a:b] for x in input_data], layer_id=args.encoder_layer)
+                elif args.input_format in ['p-tuning-GPT-generate']:
+                    pred_logits, target_ids, label_mask, eval_logits = model(*[x[a:b] for x in input_data], prompt_data=[x[a:b] for x in prompt_data],
+                                               sample_ids=sample_ids[a:b], type='train')
                 else:
-                    logits, mlm_labels = model(*[x[a:b] for x in input_data], prompt_data=[x[a:b] for x in prompt_data], sample_ids=sample_ids[a:b], type='train')
+                    logits, mlm_labels = model(*[x[a:b] for x in input_data], prompt_data=[x[a:b] for x in prompt_data],
+                                               sample_ids=sample_ids[a:b], type='train')
 
                 if args.loss == 'margin_rank':
                     num_choice = logits.size(1)
@@ -319,8 +354,15 @@ def train(args):
                     y = wrong_logits.new_ones((wrong_logits.size(0),))
                     loss = loss_func(correct_logits, wrong_logits, y)  # margin ranking loss
                 elif args.loss == 'cross_entropy':
-                    if args.input_format in ['p-tuning', 'hard-prompt', 'soft-prompt', 'p-tuning-GPT']:
+                    if args.input_format in ['pg_kg_enc_as_prompt', 'manual_hard_prompt', 'soft_prompt_p_tuning', 'GPT_kg_generator_as_prompt']:
                         loss = loss_func(logits, mlm_labels) # (bs, 2) (bs)
+                    elif args.input_format in ['p-tuning-GPT-generate']:
+                        loss_func = nn.CrossEntropyLoss(reduction='none')
+                        loss = loss_func(pred_logits, target_ids)
+                        seq_len = label_mask.shape[-1]
+                        loss = loss.view(-1, 5, seq_len)
+                        loss = torch.mul(loss, label_mask)
+                        loss = torch.sum(loss) / torch.sum(label_mask)
                     elif args.input_format in ['path-generate', 'p-tuning-GPT-classify']:
                         loss = loss_func(logits, labels[a:b])
 
@@ -347,12 +389,17 @@ def train(args):
             global_step += 1
 
         model.eval()
-        if args.input_format in ['p-tuning', 'hard-prompt', 'soft-prompt', 'p-tuning-GPT']:
+        if args.input_format in ['pg_kg_enc_as_prompt', 'manual_hard_prompt', 'soft_prompt_p_tuning', 'GPT_kg_generator_as_prompt']:
             dev_acc = evaluate_accuracy_prompt(dataset.dev(), model, type='dev')
             test_acc = evaluate_accuracy_prompt(dataset.test(), model, type='test') if dataset.test_size() > 0 else 0.0
         elif args.input_format in ['p-tuning-GPT-classify']:
             dev_acc = evaluate_accuracy_prompt_with_classify_head(dataset.dev(), model, type='dev')
-            test_acc = evaluate_accuracy_prompt_with_classify_head(dataset.test(), model, type='test') if dataset.test_size() > 0 else 0.0
+            test_acc = evaluate_accuracy_prompt_with_classify_head(dataset.test(), model,
+                                                                   type='test') if dataset.test_size() > 0 else 0.0
+        elif args.input_format in ['p-tuning-GPT-generate']:
+            dev_acc = evaluate_accuracy_prompt_with_generate(dataset.dev(), model, type='dev')
+            test_acc = evaluate_accuracy_prompt_with_generate(dataset.test(), model,
+                                                                   type='test') if dataset.test_size() > 0 else 0.0
         elif args.input_format == 'path-generate':
             dev_acc = evaluate_accuracy(dataset.dev(), model)
             test_acc = evaluate_accuracy(dataset.test(), model) if dataset.test_size() > 0 else 0.0
@@ -372,8 +419,9 @@ def train(args):
 
         model.train()
         start_time = time.time()
-        if epoch_id > args.unfreeze_epoch and epoch_id - best_dev_epoch >= args.max_epochs_before_stop:
-            break
+        if args.lr_schedule == 'fixed':
+            if epoch_id > args.unfreeze_epoch and epoch_id - best_dev_epoch >= args.max_epochs_before_stop:
+                break
 
     print()
     print('training ends in {} steps'.format(global_step))
