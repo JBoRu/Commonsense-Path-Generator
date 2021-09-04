@@ -160,6 +160,8 @@ class PromptLMRelationNet(nn.Module):
             # (bs*5, max_len)
             if "roberta" in self.model_name:
                 raw_embeds = self.encoder.module.roberta.embeddings.word_embeddings(input_ids)
+            elif "albert" in self.model_name:
+                raw_embeds = self.encoder.module.albert.embeddings.word_embeddings(input_ids)
             elif "gpt" in self.model_name:
                 raw_embeds = self.encoder.module.transformer.wte(input_ids)
             bs = raw_embeds.shape[0]
@@ -175,13 +177,19 @@ class PromptLMRelationNet(nn.Module):
 
             for bidx in range(bs):
                 for i in range(blocked_indices.shape[1]):
+                    # print(raw_embeds.shape, replace_embeds.shape)
                     raw_embeds[bidx, blocked_indices[bidx, i], :] = replace_embeds[i, :]
 
             inputs = {'inputs_embeds': raw_embeds, 'attention_mask': input_mask}
 
-            outputs = self.encoder(inputs_embeds=inputs['inputs_embeds'],
-                                   attention_mask=inputs['attention_mask'],
-                                   token_type_ids=None)
+            if "albert" in self.model_name:
+                outputs = self.encoder(inputs_embeds=inputs['inputs_embeds'],
+                                       attention_mask=inputs['attention_mask'],
+                                       token_type_ids=segment_ids)
+            else:
+                outputs = self.encoder(inputs_embeds=inputs['inputs_embeds'],
+                                       attention_mask=inputs['attention_mask'],
+                                       token_type_ids=None)
 
             prediction_scores = outputs[0]  # (bs*5, max_len, vocab_size)
             masked_logits = prediction_scores[mlm_mask == 1]  # (bs*5, vocab_size)
@@ -263,7 +271,7 @@ class PromptWithClassifyLMRelationNet(nn.Module):
         self.decoder = SoftPromptEncoder(args=self.args, init_range=init_range, embed_size=self.encoder.sent_dim)
 
 
-        self.classify_head = ClassifyMLPHead(input_size=self.encoder.sent_dim, output_size=1, init_range=init_range)
+        self.classify_head = ClassifyMLPHead(input_size=self.encoder.hidden_dim, output_size=1, init_range=init_range)
 
 
     def forward(self, *inputs, prompt_data, sample_ids=None, type=None):
@@ -274,11 +282,13 @@ class PromptWithClassifyLMRelationNet(nn.Module):
         prompt_data = [x.view(x.size(0) * x.size(1), *x.size()[2:]) for x in prompt_data]
         block_flag, mlm_mask, mlm_label = prompt_data # (bs*5, max_seq_len) (bs*5, 1)
 
-        with torch.no_grad():
-            if "roberat" in self.model_name:
-                raw_embeds = self.encoder.module.roberta.embeddings.word_embeddings(input_ids)
-            elif "gpt" in self.model_name:
-                raw_embeds = self.encoder.module.wte(input_ids)
+        if "roberta" in self.model_name:
+            raw_embeds = self.encoder.module.embeddings.word_embeddings(input_ids)
+        elif "gpt" in self.model_name:
+            raw_embeds = self.encoder.module.wte(input_ids)
+        elif "albert" in self.model_name:
+            raw_embeds = self.encoder.module.embeddings.word_embeddings(input_ids)
+
         bs = raw_embeds.shape[0]
 
         # (num_prompt, embed_size)
@@ -296,9 +306,14 @@ class PromptWithClassifyLMRelationNet(nn.Module):
 
         inputs = {'inputs_embeds': raw_embeds, 'attention_mask': input_mask}
 
-        outputs = self.encoder(inputs_embeds=inputs['inputs_embeds'],
-                               attention_mask=inputs['attention_mask'],
-                               token_type_ids=None)
+        if "albert" in self.model_name:
+            outputs = self.encoder(inputs_embeds=inputs['inputs_embeds'],
+                                   attention_mask=inputs['attention_mask'],
+                                   token_type_ids=segment_ids)
+        else:
+            outputs = self.encoder(inputs_embeds=inputs['inputs_embeds'],
+                                   attention_mask=inputs['attention_mask'],
+                                   token_type_ids=None)
 
         hidden_states = outputs[0]  # (bs*5, max_len, hid_dim)
         masked_hidden_state = hidden_states[mlm_mask == 1]  # (bs*5, hid_dim)

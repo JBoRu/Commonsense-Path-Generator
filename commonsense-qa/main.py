@@ -110,7 +110,7 @@ def freeze_and_unfreeze_net(model, args):
     if args.freeze_dec: # refer to decoder embeddings
         if args.input_format in ['soft_prompt_p_tuning','GPT_kg_generator_as_prompt', 'p-tuning-GPT-generate']:
             freeze_net(model.decoder)
-        elif args.input_format in ['p-tuning-GPT-classify']:
+        elif args.input_format in ['soft_prompt_p_tuning_classify']:
             freeze_net(model.decoder)
             freeze_net(model.classify_head)
         else:
@@ -119,7 +119,7 @@ def freeze_and_unfreeze_net(model, args):
     else:
         if args.input_format in ['soft_prompt_p_tuning','GPT_kg_generator_as_prompt', 'p-tuning-GPT-generate']:
             unfreeze_net(model.decoder)
-        elif args.input_format in ['p-tuning-GPT-classify']:
+        elif args.input_format in ['soft_prompt_p_tuning_classify']:
             unfreeze_net(model.decoder)
             unfreeze_net(model.classify_head)
         else:
@@ -204,7 +204,7 @@ def train(args):
                           init_range=args.init_range, ablation=args.ablation, use_contextualized=use_contextualized,
                           emb_scale=args.emb_scale)
         freeze_and_unfreeze_net(model, args)
-    elif args.input_format in ['p-tuning-GPT-classify']:
+    elif args.input_format in ['soft_prompt_p_tuning_classify']:
         model = PromptWithClassifyLMRelationNet(args=args, model_name=args.encoder, label_list_len=2,
                                     from_checkpoint=args.from_checkpoint,
                                     concept_num=concept_num, concept_dim=relation_dim,
@@ -256,7 +256,7 @@ def train(args):
         return
 
     no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
-    if args.input_format in ['p-tuning-GPT-classify']:
+    if args.input_format in ['soft_prompt_p_tuning_classify']:
         grouped_parameters = [
             {'params': [p for n, p in model.encoder.named_parameters() if not any(nd in n for nd in no_decay)],
              'weight_decay': args.weight_decay, 'lr': args.encoder_lr},
@@ -363,7 +363,7 @@ def train(args):
                         loss = loss.view(-1, 5, seq_len)
                         loss = torch.mul(loss, label_mask)
                         loss = torch.sum(loss) / torch.sum(label_mask)
-                    elif args.input_format in ['path-generate', 'p-tuning-GPT-classify']:
+                    elif args.input_format in ['path-generate', 'soft_prompt_p_tuning_classify']:
                         loss = loss_func(logits, labels[a:b])
 
                 loss = loss * (b - a) / bs
@@ -392,7 +392,7 @@ def train(args):
         if args.input_format in ['pg_kg_enc_as_prompt', 'manual_hard_prompt', 'soft_prompt_p_tuning', 'GPT_kg_generator_as_prompt']:
             dev_acc = evaluate_accuracy_prompt(dataset.dev(), model, type='dev')
             test_acc = evaluate_accuracy_prompt(dataset.test(), model, type='test') if dataset.test_size() > 0 else 0.0
-        elif args.input_format in ['p-tuning-GPT-classify']:
+        elif args.input_format in ['soft_prompt_p_tuning_classify']:
             dev_acc = evaluate_accuracy_prompt_with_classify_head(dataset.dev(), model, type='dev')
             test_acc = evaluate_accuracy_prompt_with_classify_head(dataset.test(), model,
                                                                    type='test') if dataset.test_size() > 0 else 0.0

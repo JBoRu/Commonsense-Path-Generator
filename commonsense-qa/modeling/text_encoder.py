@@ -14,7 +14,7 @@ MODEL_CLASS_TO_NAME = {
 
 MODEL_NAME_TO_CLASS = {model_name: model_class for model_class, model_name_list in MODEL_CLASS_TO_NAME.items() for model_name in model_name_list}
 
-MODEL_CLASSES_PROMPT = {
+MODEL_CLASSES_PROMPT_MLM = {
     'bert': {
         'config': BertConfig,
         'tokenizer': BertTokenizer,
@@ -35,11 +35,28 @@ MODEL_CLASSES_PROMPT = {
         'tokenizer': GPT2Tokenizer,
         'model': GPT2LMHeadModel
     },
-    # 'gpt': {
-    #     'config': GPT2Config,
-    #     'tokenizer': GPT2Tokenizer,
-    #     'model': GPT2Model
-    # }
+}
+MODEL_CLASSES_PROMPT_BASE = {
+    'bert': {
+        'config': BertConfig,
+        'tokenizer': BertTokenizer,
+        'model': BertModel
+    },
+    'roberta': {
+        'config': RobertaConfig,
+        'tokenizer': RobertaTokenizer,
+        'model': RobertaModel
+    },
+    'albert': {
+        'config': AlbertConfig,
+        'tokenizer': AlbertTokenizer,
+        'model': AlbertModel
+    },
+    'gpt': {
+        'config': GPT2Config,
+        'tokenizer': GPT2Tokenizer,
+        'model': GPT2Model
+    }
 }
 
 class LSTMTextEncoder(nn.Module):
@@ -167,10 +184,15 @@ class PromptTextEncoder(nn.Module):
     def __init__(self, args, model_name, label_list_len, from_checkpoint=None):
         super().__init__()
         self.model_type = MODEL_NAME_TO_CLASS[model_name]
-        self.model_dict = MODEL_CLASSES_PROMPT[self.model_type]
-        if args.input_format == "p-tuning-GPT-classify":
-            print("Using GPT2Model for mlp classify")
-            self.model_dict['model'] = GPT2Model
+        if 'classify' in args.input_format:
+            self.model_dict = MODEL_CLASSES_PROMPT_BASE[self.model_type]
+        else:
+            self.model_dict = MODEL_CLASSES_PROMPT_MLM[self.model_type]
+        print(self.model_dict)
+        # self.model_dict = MODEL_CLASSES_PROMPT[self.model_type]
+        # if args.input_format == "p-tuning-GPT-classify":
+        #     print("Using GPT2Model for mlp classify")
+        #     self.model_dict['model'] = GPT2Model
 
         print("Loading plm config....")
         config_class = self.model_dict['config']
@@ -181,6 +203,8 @@ class PromptTextEncoder(nn.Module):
                 path = "/mnt/nlp_model/huggingface/gpt2/"
             elif model_name == 'gpt2-medium':
                 path = "/mnt/nlp_model/gpt2-medium/"
+        elif self.model_type == 'albert':
+            path = "/mnt/nlp_model/albert-xxlarge-v2/"
 
         model_config = config_class.from_pretrained(path, num_labels=label_list_len)
 
@@ -210,7 +234,17 @@ class PromptTextEncoder(nn.Module):
             self.tokenizer.add_tokens(GPT_SPECIAL_TOKENS)
             self.module.resize_token_embeddings(len(self.tokenizer))
 
-        self.sent_dim = self.module.config.n_embd if self.model_type in ('gpt',) else self.module.config.hidden_size
+        if self.model_type in ('gpt', ):
+            self.sent_dim = self.module.config.n_embd
+        elif self.model_type in ('albert', ):
+            self.sent_dim = self.module.config.embedding_size
+        else:
+            self.sent_dim = self.module.config.hidden_size
+
+        if self.model_type in ('albert',):
+            self.hidden_dim = self.module.config.hidden_size
+        else:
+            self.hidden_dim = self.sent_dim
 
         print(self.model_type)
 

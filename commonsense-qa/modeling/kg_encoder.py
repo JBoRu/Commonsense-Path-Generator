@@ -46,6 +46,81 @@ class Path_Encoder(nn.Module):
 
         return context
 
+class GPTGenerater(nn.Module):
+
+    def __init__(self, args, text_emb_size, init_range):
+        super(GPTGenerater, self).__init__()
+
+        self.args = args
+        self.init_range = init_range
+        print("Load dataset of paths")
+        self.datahelper = DataHelper(args)
+
+        print("Init GPT generator")
+        lm_path = '/mnt/nlp_model/gpt2/models/gpt2_small/'
+        config = GPT2Config.from_pretrained(lm_path)
+        gpt = GPT2Model.from_pretrained(lm_path)
+        config.vocab_size = len(self.datahelper.gpt_tokenizer)
+        gpt.resize_token_embeddings(len(self.datahelper.gpt_tokenizer))
+        pretrain_generator_ckpt = os.path.join('./saved_models/pretrain_generator', 'commonsense-path-generator.ckpt')
+
+        self.generator = GeneratorForPrompt(gpt, config, max_len=args.output_len)
+        print("Load pretrained checkpoint!")
+        self.generator.load_state_dict(torch.load(pretrain_generator_ckpt, map_location='cpu'))
+
+        self.mlp = MLP(self.generator.hid_size, 2 * text_emb_size, text_emb_size, 1, dropout=0.1,
+                       batch_norm=False, layer_norm=True)
+        if self.init_range > 0:
+            self.mlp.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        if isinstance(module, (nn.Linear, nn.Embedding)):
+            module.weight.data.normal_(mean=0.0, std=self.init_range)
+            if isinstance(module, nn.Linear) and module.bias is not None:
+                module.bias.data.zero_()
+        elif isinstance(module, nn.LayerNorm):
+            module.bias.data.zero_()
+            module.weight.data.fill_(1.0)
+
+    def forward(self, type, sample_ids):
+        if type == 'train':
+            context_embedding = self._get_path_embedding_greedy(self.datahelper.trainset.tensors[0], sample_ids, self.generator, self.args)
+        elif type == 'dev':
+            context_embedding = self._get_path_embedding_greedy(self.datahelper.devset.tensors[0], sample_ids, self.generator, self.args)
+        elif type == 'test':
+            if self.args.inhouse:
+                context_embedding = self._get_path_embedding_greedy(self.datahelper.trainset.tensors[0], sample_ids, self.generator, self.args)
+            else:
+                context_embedding = self._get_path_embedding_greedy(self.datahelper.testset.tensors[0], sample_ids, self.generator, self.args)
+
+        context_embedding = self.mlp(context_embedding) # (bs, num_context, emb_size)
+        return context_embedding
+
+    def _get_path_embedding_greedy(self, dataset, sample_ids, generator, args, tokenizer=None, output_file=None):
+
+        dataset = dataset.to(sample_ids.device)
+        batch_data = dataset[sample_ids]
+        assert batch_data.shape[0] == sample_ids.shape[0], "batch data length not equal"
+
+        context = batch_data
+        # context = context[0].to(args.device)
+        batch_size, num_choice, num_context, context_len = context.size()
+        context = context.view(-1, context_len)
+        context_embedding = self.generator(context) # (-1, hid)
+        # (bs, num_choice, num_path, hid)
+
+        context_embedding = context_embedding.view(batch_size*num_choice, num_context, -1)
+
+        # if not output_file is None:
+        #     for path in generated_paths:
+        #         path = tokenizer.decode(path.tolist(), skip_special_tokens=True)
+        #         path = ' '.join(path.replace('<PAD>', '').split())
+        #         output_file.write(path + '\n')
+
+        # path_embeddings.extend(context_embedding.tolist())
+
+        return context_embedding # (bs, num_context, hid)
+
 class RelationNet(nn.Module):
 
     def __init__(self, concept_num, concept_dim, relation_num, relation_dim, sent_dim, concept_in_dim,
@@ -308,6 +383,12 @@ class SoftPromptEncoder(nn.Module):
                     replace_embeds_2 = self.lstm_head(replace_embeds[:, sep:int(2*sep),:])[0]
                     replace_embeds_3 = self.lstm_head(replace_embeds[:, int(2*sep):, :])[0]
                     replace_embeds = torch.cat((replace_embeds_1, replace_embeds_2, replace_embeds_3), dim=1)
+                elif self.args.pattern_type == 5: ### _ _ _ q c _ ###
+                    sep = self.prompt_token_num-1
+                    replace_embeds_1 = self.lstm_head(replace_embeds[:, 0:sep, :])[0]
+                    replace_embeds_2 = self.lstm_head(replace_embeds[:, sep:, :])[0]
+                    replace_embeds = torch.cat((replace_embeds_1, replace_embeds_2), dim=1)
+
             else                                                                                                                                                            :
                 replace_embeds = self.lstm_head(replace_embeds)[0]  # [1, num_promt_token, 2 * hidden_dim]
 
@@ -317,78 +398,3 @@ class SoftPromptEncoder(nn.Module):
                 replace_embeds = self.mlp_head(replace_embeds).squeeze() # [num_promt_token, hid_dim]
 
         return replace_embeds
-
-class GPTGenerater(nn.Module):
-
-    def __init__(self, args, text_emb_size, init_range):
-        super(GPTGenerater, self).__init__()
-
-        self.args = args
-        self.init_range = init_range
-        print("Load dataset of paths")
-        self.datahelper = DataHelper(args)
-
-        print("Init GPT generator")
-        lm_path = '/mnt/nlp_model/gpt2/models/gpt2_small/'
-        config = GPT2Config.from_pretrained(lm_path)
-        gpt = GPT2Model.from_pretrained(lm_path)
-        config.vocab_size = len(self.datahelper.gpt_tokenizer)
-        gpt.resize_token_embeddings(len(self.datahelper.gpt_tokenizer))
-        pretrain_generator_ckpt = os.path.join('./saved_models/pretrain_generator', 'commonsense-path-generator.ckpt')
-
-        self.generator = GeneratorForPrompt(gpt, config, max_len=args.output_len)
-        print("Load pretrained checkpoint!")
-        self.generator.load_state_dict(torch.load(pretrain_generator_ckpt, map_location='cpu'))
-
-        self.mlp = MLP(self.generator.hid_size, 2 * text_emb_size, text_emb_size, 1, dropout=0.1,
-                       batch_norm=False, layer_norm=True)
-        if self.init_range > 0:
-            self.mlp.apply(self._init_weights)
-
-    def _init_weights(self, module):
-        if isinstance(module, (nn.Linear, nn.Embedding)):
-            module.weight.data.normal_(mean=0.0, std=self.init_range)
-            if isinstance(module, nn.Linear) and module.bias is not None:
-                module.bias.data.zero_()
-        elif isinstance(module, nn.LayerNorm):
-            module.bias.data.zero_()
-            module.weight.data.fill_(1.0)
-
-    def forward(self, type, sample_ids):
-        if type == 'train':
-            context_embedding = self._get_path_embedding_greedy(self.datahelper.trainset.tensors[0], sample_ids, self.generator, self.args)
-        elif type == 'dev':
-            context_embedding = self._get_path_embedding_greedy(self.datahelper.devset.tensors[0], sample_ids, self.generator, self.args)
-        elif type == 'test':
-            if self.args.inhouse:
-                context_embedding = self._get_path_embedding_greedy(self.datahelper.trainset.tensors[0], sample_ids, self.generator, self.args)
-            else:
-                context_embedding = self._get_path_embedding_greedy(self.datahelper.testset.tensors[0], sample_ids, self.generator, self.args)
-
-        context_embedding = self.mlp(context_embedding) # (bs, num_context, emb_size)
-        return context_embedding
-
-    def _get_path_embedding_greedy(self, dataset, sample_ids, generator, args, tokenizer=None, output_file=None):
-
-        dataset = dataset.to(sample_ids.device)
-        batch_data = dataset[sample_ids]
-        assert batch_data.shape[0] == sample_ids.shape[0], "batch data length not equal"
-
-        context = batch_data
-        # context = context[0].to(args.device)
-        batch_size, num_choice, num_context, context_len = context.size()
-        context = context.view(-1, context_len)
-        context_embedding = self.generator(context) # (-1, hid)
-        # (bs, num_choice, num_path, hid)
-
-        context_embedding = context_embedding.view(batch_size*num_choice, num_context, -1)
-
-        # if not output_file is None:
-        #     for path in generated_paths:
-        #         path = tokenizer.decode(path.tolist(), skip_special_tokens=True)
-        #         path = ' '.join(path.replace('<PAD>', '').split())
-        #         output_file.write(path + '\n')
-
-        # path_embeddings.extend(context_embedding.tolist())
-
-        return context_embedding # (bs, num_context, hid)
