@@ -795,6 +795,8 @@ def load_bert_xlnet_roberta_input_tensors(args, statement_jsonl_path, model_type
                     tokens_a = tokenizer.tokenize(context)
                     tokens_b = tokenizer.tokenize(example.question + " " + ending)
                 elif args.input_format == 'manual_hard_prompt':
+                    if ex_index == ending_idx == 0:
+                        print("Using input pattern of 'Question: q Is it c? [mask], it is!' ")
                     context = "Question: " + context  # context is question
                     ending = " Is it " + ending + "?"  # ending is choice
                     masked = " " + mask_token + ", it is!"
@@ -834,9 +836,27 @@ def load_bert_xlnet_roberta_input_tensors(args, statement_jsonl_path, model_type
                         soft_prompt = " ".join(soft_prompt)
                         masked = " " + mask_token + ", it is!"
                         sen_a = soft_prompt + " " + context + " " + ending + " " + soft_prompt + masked
+                    elif pattern_type == 3:
+                        if ex_index == ending_idx == 0:
+                            print("Using input pattern of 'p1 p2 p3 Question: q Is it c? [mask]' ")
+                        context = "Question: " + context  # context is question
+                        ending = "Is it " + ending + "?"  # ending is choice
+                        soft_prompt = [mask_token for i in range(num_prompt_token)]
+                        soft_prompt = " ".join(soft_prompt)
+                        masked = " " + mask_token + ", it is!"
+                        sen_a = soft_prompt + " " + context + " " + ending + masked
+                    elif pattern_type == 4:
+                        if ex_index == ending_idx == 0:
+                            print("Using input pattern of 'Question: q Is it c? p1 p2 p3 p4 p5 p6' ")
+                        context = "Question: " + context  # context is question
+                        ending = " Is it " + ending + "?"  # ending is choice
+                        soft_prompt = [mask_token for i in range(num_prompt_token)]
+                        soft_prompt = " ".join(soft_prompt)
+                        soft_prompt = " " + soft_prompt
+                        sen_a = context + ending + soft_prompt
 
-                    if args.input_format in ['soft_prompt_p_tuning_classify']:
-                        sen_a = sen_a[:-1] # drop masked token
+                    # if args.input_format in ['soft_prompt_p_tuning_classify']:
+                        # sen_a = sen_a[:-1] # drop masked token
                     tokens_a = tokenizer.tokenize(sen_a)
                     # print("Debug: sentence a is ", sen_a)
                     # print("Debug: tokenized sentence a is ", tokens_a)
@@ -878,16 +898,18 @@ def load_bert_xlnet_roberta_input_tensors(args, statement_jsonl_path, model_type
                 # get the mask position, the first is used for insert prompt, the second is used for prediction
                 mask_token_id = tokenizer.convert_tokens_to_ids([mask_token])
                 mask_token_index = [index for index, id in enumerate(input_ids) if id in mask_token_id]
-                assert len(mask_token_index) == (num_prompt_token+1), "More than specified masked position in one example"
+                # assert len(mask_token_index) == (num_prompt_token+1), "More than specified masked position in one example"
                 block_flag = [0]*len(input_ids)
                 mlm_mask = [0]*len(input_ids)
                 if args.input_format in ['pg_kg_enc_as_prompt', 'soft_prompt_p_tuning', 'soft_prompt_p_tuning_classify', 'GPT_kg_generator_as_prompt']:
-                    for idx in mask_token_index[0:-1]:
-                        block_flag[idx] = 1  # 1 for prompt placeholder
-                    mlm_mask[mask_token_index[-1]] = 1 # 1 for masked token
-                    if args.input_format in ['soft_prompt_p_tuning_classify']: # using cls at the head position
-                        mlm_mask[mask_token_index[-1]] = 0
+                    if pattern_type == 4: # no mask token and use cls at the head position
+                        for idx in mask_token_index:
+                            block_flag[idx] = 1  # 1 for prompt placeholder
                         mlm_mask[0] = 1
+                    else:
+                        for idx in mask_token_index[0:-1]:
+                            block_flag[idx] = 1  # 1 for prompt placeholder
+                        mlm_mask[mask_token_index[-1]] = 1 # 1 for masked token
                 elif args.input_format == 'manual_hard_prompt':
                     if len(mask_token_index) == 1:
                         mlm_mask[mask_token_index[-1]] = 1  # 1 for masked token

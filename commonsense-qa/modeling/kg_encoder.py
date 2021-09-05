@@ -397,4 +397,7 @@ class SoftPromptEncoder(nn.Module):
             else:
                 replace_embeds = self.mlp_head(replace_embeds).squeeze() # [num_promt_token, hid_dim]
 
+        if self.args.using_mlp:
+            replace_embeds = self.mlp_head(replace_embeds)  # [num_promt_token, hid_dim]
+
         return replace_embeds

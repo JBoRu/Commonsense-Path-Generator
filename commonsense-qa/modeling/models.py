@@ -74,7 +74,7 @@ class PromptLMRelationNet(nn.Module):
 
     def forward(self, *inputs, prompt_data, sample_ids=None, type=None):
         inputs = [x.view(x.size(0) * x.size(1), *x.size()[2:]) for x in inputs]  # merge the batch dimension and the num_choice dimension
-        if self.args.input_format == 'soft_prompt_p_tuning':
+        if self.args.input_format in ['soft_prompt_p_tuning', 'manual_hard_prompt']:
             lm_inputs = inputs
         else:
             *lm_inputs, path_embedding, qa_ids, rel_ids, num_tuples = inputs

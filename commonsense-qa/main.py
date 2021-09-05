@@ -337,7 +337,7 @@ def train(args):
             for a in range(0, bs, args.mini_batch_size):
                 b = min(a + args.mini_batch_size, bs)
                 if args.input_format == 'path-generate':
-                      logits, _ = model(*[x[a:b] for x in input_data], layer_id=args.encoder_layer)
+                    logits, _ = model(*[x[a:b] for x in input_data], layer_id=args.encoder_layer)
                 elif args.input_format in ['p-tuning-GPT-generate']:
                     pred_logits, target_ids, label_mask, eval_logits = model(*[x[a:b] for x in input_data], prompt_data=[x[a:b] for x in prompt_data],
                                                sample_ids=sample_ids[a:b], type='train')

@@ -190,7 +190,7 @@ def get_parser():
     parser.add_argument('--lstm_split', default=0, type=int, help='whether to use lstm to model splited prompt tokems')
     parser.add_argument('--pattern_type', default=0, type=int, help='input pattern format')
     parser.add_argument('--using_lstm_mlp', default=1, type=int, help='wether to use lstm and mlp to model prompt tokens')
-
+    parser.add_argument('--using_mlp', default=0, type=int, help='wether to use lstm and mlp to model prompt tokens')
 
 
     # regularization
