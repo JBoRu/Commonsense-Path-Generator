@@ -1,5 +1,6 @@
 import random
 
+import numpy
 import torch
 from transformers import *
 
@@ -126,14 +127,28 @@ def freeze_and_unfreeze_net(model, args):
             unfreeze_net(model.decoder.rel_emb)
             unfreeze_net(model.decoder.concept_emb)
 
+def seed_torch(seed=1029):
+    random.seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    # torch.cuda.manual_seed_all(seed)  # if you are using multi-GPU.
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+
+
 def train(args):
     # print(args)
 
     random.seed(args.seed)
+    os.environ['PYTHONHASHSEED'] = str(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
-    if torch.cuda.is_available() and args.cuda:
-        torch.cuda.manual_seed(args.seed)
+    torch.cuda.manual_seed(args.seed)
+    # torch.cuda.manual_seed_all(seed)  # if you are using multi-GPU.
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
 
     config_path = os.path.join(args.save_dir, 'config.json')
     model_path = os.path.join(args.save_dir, 'model.pt')

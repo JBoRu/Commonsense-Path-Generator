@@ -197,7 +197,10 @@ class PromptTextEncoder(nn.Module):
         print("Loading plm config....")
         config_class = self.model_dict['config']
         if self.model_type == 'roberta':
-            path = "/mnt/nlp_model/huggingface/roberta-large/"
+            if model_name == 'roberta-large':
+                path = "/mnt/nlp_model/huggingface/roberta-large/"
+            elif model_name == 'roberta-base':
+                path = "/mnt/nlp_model/roberta-base/"
         elif self.model_type == 'gpt':
             if model_name == 'gpt2':
                 path = "/mnt/nlp_model/huggingface/gpt2/"
@@ -207,6 +210,7 @@ class PromptTextEncoder(nn.Module):
             path = "/mnt/nlp_model/albert-xxlarge-v2/"
 
         model_config = config_class.from_pretrained(path, num_labels=label_list_len)
+        print("Load model from %s"%path)
 
         print("Loading plm tokenizer....")
         tokenizer_class = self.model_dict['tokenizer']

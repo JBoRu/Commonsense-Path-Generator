@@ -55,7 +55,7 @@ class PromptLMRelationNet(nn.Module):
         self.prompt_token_num = prompt_token_num
         self.kg_enc_out_size = self.encoder.sent_dim * prompt_token_num
 
-        if self.args.input_format == 'soft_prompt_p_tuning':
+        if self.args.input_format in ['soft_prompt_p_tuning', 'manual_hard_prompt']:
             self.decoder = SoftPromptEncoder(args=self.args, init_range=init_range, embed_size=self.encoder.sent_dim)
         elif self.args.input_format == 'GPT_kg_generator_as_prompt': # using gpt generate knowledge with input of "tail <sep> head"
             self.decoder = GPTGenerater(args=self.args, text_emb_size=self.encoder.sent_dim, init_range=init_range)
@@ -173,12 +173,15 @@ class PromptLMRelationNet(nn.Module):
                 print("the dim of soft prompt {} and raw embeddings {} is different".format(replace_embeds.shape[-1],
                                                                                             raw_embeds.shape[-1]))
 
-            blocked_indices = (block_flag == 1).nonzero().reshape((-1, self.prompt_token_num, 2))[:, :, 1]
+            if (block_flag == 1).nonzero().shape[0] != 0:
+                blocked_indices = (block_flag == 1).nonzero().reshape((-1, self.prompt_token_num, 2))[:, :, 1]
+                for bidx in range(bs):
+                    for i in range(blocked_indices.shape[1]):
+                        # print(raw_embeds.shape, replace_embeds.shape)
+                        raw_embeds[bidx, blocked_indices[bidx, i], :] = replace_embeds[i, :]
+            # else:
+            #     print("No prompt used!")
 
-            for bidx in range(bs):
-                for i in range(blocked_indices.shape[1]):
-                    # print(raw_embeds.shape, replace_embeds.shape)
-                    raw_embeds[bidx, blocked_indices[bidx, i], :] = replace_embeds[i, :]
 
             inputs = {'inputs_embeds': raw_embeds, 'attention_mask': input_mask}
 
@@ -297,12 +300,11 @@ class PromptWithClassifyLMRelationNet(nn.Module):
         if replace_embeds.shape[-1] != raw_embeds.shape[-1]:
             print("the dim of soft prompt {} and raw embeddings {} is different".format(replace_embeds.shape[-1],
                                                                                         raw_embeds.shape[-1]))
-
-        blocked_indices = (block_flag == 1).nonzero().reshape((-1, self.prompt_token_num, 2))[:, :, 1]
-
-        for bidx in range(bs):
-            for i in range(blocked_indices.shape[1]):
-                raw_embeds[bidx, blocked_indices[bidx, i], :] = replace_embeds[i, :]
+        if (block_flag == 1).nonzero().shape[0] != 0:
+            blocked_indices = (block_flag == 1).nonzero().reshape((-1, self.prompt_token_num, 2))[:, :, 1]
+            for bidx in range(bs):
+                for i in range(blocked_indices.shape[1]):
+                    raw_embeds[bidx, blocked_indices[bidx, i], :] = replace_embeds[i, :]
 
         inputs = {'inputs_embeds': raw_embeds, 'attention_mask': input_mask}
 
