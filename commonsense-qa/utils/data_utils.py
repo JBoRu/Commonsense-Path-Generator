@@ -851,18 +851,36 @@ def load_bert_xlnet_roberta_input_tensors(args, statement_jsonl_path, model_type
                         context = context  # context is question
                         ending = ending  # ending is choice
                         masked = mask_token
-                        sen_a = context + " " + sep_token + " " + ending + " " + masked
+                        if sep_token_extra:
+                            sen_a = context + " " + ending + ". " + sep_token + " " + sep_token + " " + masked
+                        else:
+                            sen_a = context + " " + ending + ". " + sep_token + " " + masked
+                        sen_a = sen_a.lower()
                     # soft prompt gen
                     elif pattern_type == 0:
                         if ex_index == ending_idx == 0:
                             print("Using input pattern of 'Question: q Is it c? p1 p2 p3 p4 p5 p6 [mask]' ")
                         context = "Question: " + context  # context is question
-                        ending = " Is it " + ending + "?"  # ending is choice
+                        ending = "Is it " + ending + "?"  # ending is choice
                         soft_prompt = [mask_token for i in range(num_prompt_token)]
                         soft_prompt = " ".join(soft_prompt)
-                        soft_prompt = " " + soft_prompt
-                        masked = " " + mask_token + ", it is!"
-                        sen_a = context + ending + soft_prompt + masked
+                        soft_prompt = soft_prompt
+                        masked = mask_token + ", it is!"
+                        sen_a = context + " " + ending + " " + soft_prompt + " " + masked
+                    # soft prompt gen for 0
+                    elif pattern_type == 10:
+                        if ex_index == ending_idx == 0:
+                            print("Using input pattern of 'q Is it c? sep p1 p2 p3 p4 p5 p6 [mask], it is!' ")
+                        context = context  # context is question
+                        ending = "Is it " + ending + "?"  # ending is choice
+                        soft_prompt = [mask_token for i in range(num_prompt_token)]
+                        soft_prompt = " ".join(soft_prompt)
+                        masked = mask_token + ", it is!"
+                        if sep_token_extra:
+                            sen_a = context + " " + ending + " " + sep_token + " " + sep_token + " " + soft_prompt + " " + masked
+                        else:
+                            sen_a = context + " " + ending + " " + sep_token + " " + soft_prompt + " " + masked
+                        sen_a = sen_a.lower()
                     # soft prompt gen
                     elif pattern_type == 1:
                         if ex_index == ending_idx == 0:
@@ -894,7 +912,7 @@ def load_bert_xlnet_roberta_input_tensors(args, statement_jsonl_path, model_type
                         soft_prompt = " ".join(soft_prompt)
                         masked = " " + mask_token + ", it is!"
                         sen_a = soft_prompt + " " + context + " " + ending + masked
-                    # soft prompt gen
+                    # soft prompt cls
                     elif pattern_type == 4:
                         if ex_index == ending_idx == 0:
                             print("Using input pattern of 'Question: q Is it c? p1 p2 p3 p4 p5 p6' ")
@@ -904,13 +922,30 @@ def load_bert_xlnet_roberta_input_tensors(args, statement_jsonl_path, model_type
                         soft_prompt = " ".join(soft_prompt)
                         soft_prompt = " " + soft_prompt
                         sen_a = context + ending + soft_prompt
+                    # soft prompt cls for 4
+                    elif pattern_type == 11:
+                        if ex_index == ending_idx == 0:
+                            print("Using input pattern of 'q <sep> candidate answer is c _ _ _ _ _ _ mask' ")
+                        context = context  # context is question
+                        ending = "Candidate Answer is " + ending + "."  # ending is choice
+                        soft_prompt = [mask_token for i in range(num_prompt_token)]
+                        soft_prompt = " ".join(soft_prompt)
+                        if sep_token_extra:
+                            sen_a = context + " " + sep_token + " " + sep_token + " " + ending + " " + soft_prompt + mask_token
+                        else:
+                            sen_a = context + " " + sep_token + " " + ending + " " + soft_prompt + mask_token
+                        sen_a = sen_a.lower()
                     # no prompt cls
                     elif pattern_type == 5:
                         if ex_index == ending_idx == 0:
                             print("Using input pattern of 'cls q sep c end' ")
                         context = context  # context is question
                         ending = ending # ending is choice
-                        sen_a = context + " " + sep_token + " " + ending
+                        if sep_token_extra:
+                            sen_a = context + " " + sep_token + " " + sep_token + " " + ending + "."
+                        else:
+                            sen_a = context + " " + sep_token + " " + ending + "."
+                        sen_a = sen_a.lower()
                     # hard prompt gen
                     elif pattern_type == 6:
                         if ex_index == ending_idx == 0:
@@ -919,6 +954,18 @@ def load_bert_xlnet_roberta_input_tensors(args, statement_jsonl_path, model_type
                         ending = "Is it " + ending + "?"  # ending is choice
                         masked = " " + mask_token + ", it is!"
                         sen_a = context + " " + ending + masked
+                    # hard prompt gen from 6
+                    elif pattern_type == 8:
+                        if ex_index == ending_idx == 0:
+                            print("Using input pattern of 'q <sep> Is it c? [mask], it is' ")
+                        context = context  # context is question
+                        ending = "Is it " + ending + "?"  # ending is choice
+                        masked = mask_token + ", it is!"
+                        if sep_token_extra:
+                            sen_a = context + " " + sep_token + " " + sep_token + " " + ending  + " " + masked
+                        else:
+                            sen_a = context + " " + sep_token + " " + ending + " " + masked
+                        sen_a = sen_a.lower()
                     # hard prompt cls
                     elif pattern_type == 7:
                         if ex_index == ending_idx == 0:
@@ -926,22 +973,29 @@ def load_bert_xlnet_roberta_input_tensors(args, statement_jsonl_path, model_type
                         context = "Question: " + context  # context is question
                         ending = "Answer: " + ending  # ending is choice
                         sen_a = context + " " + ending
+                    # hard prompt cls from 7
+                    elif pattern_type == 9:
+                        if ex_index == ending_idx == 0:
+                            print("Using input pattern of 'q <sep> candidate answer is c' ")
+                        context = context  # context is question
+                        ending = "Candidate Answer is " + ending + "."  # ending is choice
+                        if sep_token_extra:
+                            sen_a = context + " " + sep_token + " " + sep_token + " " + ending
+                        else:
+                            sen_a = context + " " + sep_token + " " + ending
+                        sen_a = sen_a.lower()
 
-                    # if args.input_format in ['soft_prompt_p_tuning_classify']:
-                        # sen_a = sen_a[:-1] # drop masked token
                     tokens_a = tokenizer.tokenize(sen_a)
-                    # print("Debug: sentence a is ", sen_a)
-                    # print("Debug: tokenized sentence a is ", tokens_a)
                     tokens_b = []
 
                 # for roberta, it will be format of <s> X </s> or <s> A </s></s> B </s>
-                special_tokens_count = 4 if (sep_token_extra and bool(tokens_b)) else 3
-                _truncate_seq_pair(tokens_a, tokens_b, max_seq_length - special_tokens_count)
+                # special_tokens_count = 4 if (sep_token_extra and bool(tokens_b)) else 3
+                # _truncate_seq_pair(tokens_a, tokens_b, max_seq_length - special_tokens_count)
 
                 tokens = tokens_a + [sep_token]
-                if sep_token_extra and bool(tokens_b):
-                    # roberta uses an extra separator b/w pairs of sentences
-                    tokens += [sep_token]
+                # if sep_token_extra and bool(tokens_b):
+                #     # roberta uses an extra separator b/w pairs of sentences
+                #     tokens += [sep_token]
 
                 segment_ids = [sequence_a_segment_id] * len(tokens)
 
@@ -956,8 +1010,6 @@ def load_bert_xlnet_roberta_input_tensors(args, statement_jsonl_path, model_type
                     tokens = [cls_token] + tokens
                     segment_ids = [cls_token_segment_id] + segment_ids
                 # till now, tokens become <cls> context </s>
-                # print("Debug: tokenized context is ", tokens)
-                # print("Debug: respective segment ids is ", segment_ids)
 
                 # convert to ids
                 input_ids = tokenizer.convert_tokens_to_ids(tokens)
@@ -980,11 +1032,11 @@ def load_bert_xlnet_roberta_input_tensors(args, statement_jsonl_path, model_type
                         mlm_mask[0] = 1
                     elif pattern_type == 5: # no prompt for class
                         mlm_mask[0] = 1
-                    elif pattern_type == 7: # hard prompt fot  class
+                    elif pattern_type in [7,9]: # hard prompt fot  class
                         mlm_mask[0] = 1
                     elif pattern_type == -1: # no prompt for gen
                         mlm_mask[mask_token_index[0]] = 1
-                    elif pattern_type == 6: # hard prompt for gen
+                    elif pattern_type in [6, 8]: # hard prompt for gen
                         mlm_mask[mask_token_index[0]] = 1
                     else: # soft ptompt gen
                         for idx in mask_token_index[0:-1]:

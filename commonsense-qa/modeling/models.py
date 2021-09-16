@@ -47,7 +47,7 @@ class PromptLMRelationNet(nn.Module):
         self.model_name = model_name
         self.use_contextualized = use_contextualized
         self.label_list = [0, 1]
-        self.verbalize = {0: ["No"], 1: ["Yes"]}
+        self.verbalize = {0: ["no"], 1: ["yes"]}
         self.max_num_verbalizers = 1
         self.encoder = PromptTextEncoder(args, model_name, label_list_len, from_checkpoint=from_checkpoint)
 
@@ -174,14 +174,12 @@ class PromptLMRelationNet(nn.Module):
                                                                                             raw_embeds.shape[-1]))
 
             if (block_flag == 1).nonzero().shape[0] != 0:
+            # if self.args.pattern_type not in [-1, 5, 6, 7, 8]:
                 blocked_indices = (block_flag == 1).nonzero().reshape((-1, self.prompt_token_num, 2))[:, :, 1]
                 for bidx in range(bs):
                     for i in range(blocked_indices.shape[1]):
                         # print(raw_embeds.shape, replace_embeds.shape)
                         raw_embeds[bidx, blocked_indices[bidx, i], :] = replace_embeds[i, :]
-            # else:
-            #     print("No prompt used!")
-
 
             inputs = {'inputs_embeds': raw_embeds, 'attention_mask': input_mask}
 
@@ -240,7 +238,8 @@ class PromptLMRelationNet(nn.Module):
                corresponds to multiple tokens.
         :return: either the list of token ids or the single token id corresponding to this word
         """
-        kwargs = {'add_prefix_space': True} if isinstance(tokenizer, GPT2Tokenizer) else {}
+        # kwargs = {'add_prefix_space': True} if isinstance(tokenizer, GPT2Tokenizer) else {}
+        kwargs = {}
         ids = tokenizer.encode(word, add_special_tokens=False, **kwargs)
         if not force_single_token:
             return ids
