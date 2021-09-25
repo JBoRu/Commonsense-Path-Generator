@@ -1,3 +1,4 @@
+import torch
 from transformers import *
 from utils.layers import *
 from utils.data_utils import get_gpt_token_num, GPT_SPECIAL_TOKENS
@@ -189,10 +190,6 @@ class PromptTextEncoder(nn.Module):
         else:
             self.model_dict = MODEL_CLASSES_PROMPT_MLM[self.model_type]
         print(self.model_dict)
-        # self.model_dict = MODEL_CLASSES_PROMPT[self.model_type]
-        # if args.input_format == "p-tuning-GPT-classify":
-        #     print("Using GPT2Model for mlp classify")
-        #     self.model_dict['model'] = GPT2Model
 
         print("Loading plm config....")
         config_class = self.model_dict['config']
@@ -220,6 +217,11 @@ class PromptTextEncoder(nn.Module):
         model_class = self.model_dict['model']
         self.module = model_class.from_pretrained(path, config=model_config)
 
+        if self.model_type == 'roberta':
+            prompt_token = '[PROMPT]'
+            self.tokenizer.add_tokens([prompt_token])
+            self.module.resize_token_embeddings(len(self.tokenizer))
+
         if not from_checkpoint == 'None':
             # self.module = self.module.from_pretrained(from_checkpoint, config=module_config, cache_dir='../cache/')
             weight = torch.load(from_checkpoint, map_location='cpu')
@@ -238,17 +240,36 @@ class PromptTextEncoder(nn.Module):
             self.tokenizer.add_tokens(GPT_SPECIAL_TOKENS)
             self.module.resize_token_embeddings(len(self.tokenizer))
 
+        # set dimension of word embeddings
         if self.model_type in ('gpt', ):
             self.sent_dim = self.module.config.n_embd
         elif self.model_type in ('albert', ):
             self.sent_dim = self.module.config.embedding_size
         else:
             self.sent_dim = self.module.config.hidden_size
-
+        # set dimension of output hidden state
         if self.model_type in ('albert',):
             self.hidden_dim = self.module.config.hidden_size
         else:
             self.hidden_dim = self.sent_dim
+
+        # set word embeddings
+        if "roberta" in model_name:
+            try:
+                self.embeddings = self.module.embeddings.word_embeddings
+            except:
+                self.embeddings = self.module.roberta.embeddings.word_embeddings
+        elif "gpt" in model_name:
+            try:
+                self.embeddings = self.module.wte
+            except:
+                self.embeddings = self.module.transformer.wte
+        elif "albert" in model_name:
+            try:
+                self.embeddings = self.module.embeddings.word_embeddings
+            except:
+                self.embeddings = self.module.albert.embeddings.word_embeddings
+
 
         print(self.model_type)
 
@@ -283,3 +304,167 @@ class ClassifyMLPHead(nn.Module):
     def forward(self, input):
         output = self.classify_head(input) # (bs, 1)
         return output
+
+class ClassifyMLPHeadForKCR(nn.Module):
+    def __init__(self, args, input_size, output_size, init_range):
+        super(ClassifyMLPHeadForKCR, self).__init__()
+        self.args = args
+        self.init_range = init_range
+        if self.args.using_attention_for_kcr:
+            self.att_merge = AttentionMerge(input_size, output_size, 0.1)
+        self.classify_head = nn.Sequential(nn.Dropout(0.1), nn.Linear(input_size, 1))
+
+        if self.init_range > 0:
+            self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        if isinstance(module, (nn.Linear, nn.Embedding)):
+            module.weight.data.normal_(mean=0.0, std=self.init_range)
+            if isinstance(module, nn.Linear) and module.bias is not None:
+                module.bias.data.zero_()
+        elif isinstance(module, nn.LayerNorm):
+            module.bias.data.zero_()
+            module.weight.data.fill_(1.0)
+
+    def forward(self, input, attention_mask, mlm_mask):
+        if self.args.using_attention_for_kcr:
+            # outputs[0]: [B*1, L, H] => [B*1, H]
+            h12 = self.att_merge(input, attention_mask)
+            # [B*1, H] => [B*1, 1] => [B, 1]
+            logits = self.classify_head(h12)
+        else:
+            logits = self.classify_head(input[mlm_mask == 1])
+
+        return logits
+
+class ClassifyMLPHeadForKCRWithConcatChoices(nn.Module):
+    def __init__(self, args, input_size, output_size, init_range):
+        super(ClassifyMLPHeadForKCRWithConcatChoices, self).__init__()
+        self.args = args
+        self.init_range = init_range
+        if self.args.using_attention_for_kcr:
+            self.att_merge = AttentionMergeWithConcatChoices(input_size, output_size, 0.1)
+        self.classify_head = nn.Sequential(nn.Dropout(0.1), nn.Linear(input_size, 1))
+
+        if self.init_range > 0:
+            self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        if isinstance(module, (nn.Linear, nn.Embedding)):
+            module.weight.data.normal_(mean=0.0, std=self.init_range)
+            if isinstance(module, nn.Linear) and module.bias is not None:
+                module.bias.data.zero_()
+        elif isinstance(module, nn.LayerNorm):
+            module.bias.data.zero_()
+            module.weight.data.fill_(1.0)
+
+    def forward(self, input, attention_mask, mlm_mask):
+        # input: [bs*1, seq_len, hid_size]
+        if self.args.using_attention_for_kcr:
+            # outputs[0]: [B*1, L, H] => [B*1, 5, H]
+            h12 = self.att_merge(input, attention_mask, mlm_mask)
+            # [B*1, 5, H] => [B*1, 5, 1] => [B, 5, 1]
+            logits = self.classify_head(h12)
+        else:
+            # bs, 5, 1
+            logits = self.classify_head(input[mlm_mask == 1])
+
+        return logits
+
+class AttentionMerge(nn.Module):
+    """
+    H (B, L, hidden_size) => h (B, hidden_size)
+    """
+    def __init__(self, input_size, attention_size, dropout_prob):
+        super(AttentionMerge, self).__init__()
+        self.attention_size = attention_size
+        self.hidden_layer = nn.Linear(input_size, self.attention_size)
+        self.query_ = nn.Parameter(torch.Tensor(self.attention_size, 1))
+        self.dropout = nn.Dropout(dropout_prob)
+
+        self.query_.data.normal_(mean=0.0, std=0.02)
+
+    def forward(self, values, mask=None):
+        """
+        (b, l, h) -> (b, h)
+        """
+        if mask is None:
+            mask = torch.zeros_like(values)
+            # mask = mask.data.normal_(mean=0.0, std=0.02)
+        else:
+            mask = (1 - mask.unsqueeze(-1).type(torch.float)) * -1000.
+
+        keys = self.hidden_layer(values)
+        keys = torch.tanh(keys)
+        query_var = torch.var(self.query_)
+        # (b, l, h) + (h, 1) -> (b, l, 1)
+        attention_probs = keys @ self.query_ / math.sqrt(self.attention_size * query_var)
+        # attention_probs = keys @ self.query_ / math.sqrt(self.attention_size)
+
+        attention_probs = F.softmax(attention_probs * mask, dim=1)
+        attention_probs = self.dropout(attention_probs)
+
+        # 为什么通过相加这个注意力分数
+        context = torch.sum(attention_probs + values, dim=1)
+        return context
+
+class AttentionMergeWithConcatChoices(nn.Module):
+    """
+    H (B, L, hidden_size) => h (B, hidden_size)
+    """
+    def __init__(self, input_size, attention_size, dropout_prob):
+        super(AttentionMergeWithConcatChoices, self).__init__()
+        self.attention_size = attention_size
+        self.hidden_layer = nn.Linear(input_size, self.attention_size)
+        self.query_ = nn.Parameter(torch.Tensor(self.attention_size, 1))
+        self.dropout = nn.Dropout(dropout_prob)
+
+        self.query_.data.normal_(mean=0.0, std=0.02)
+
+    def forward(self, values, mask=None, mlm_mask=None):
+        """
+        (b, l, h) -> (b, h)
+        """
+        if mask is None:
+            mask = torch.zeros_like(values)
+            # mask = mask.data.normal_(mean=0.0, std=0.02)
+        else:
+            mask = (1 - mask.unsqueeze(-1).type(torch.float)) * -1000.
+
+        keys = self.hidden_layer(values)
+        keys = torch.tanh(keys)
+        query_var = torch.var(self.query_)
+        # (b, l, h) + (h, 1) -> (b, l, 1)
+        attention_probs = keys @ self.query_ / math.sqrt(self.attention_size * query_var)
+        # attention_probs = keys @ self.query_ / math.sqrt(self.attention_size)
+
+        attention_probs = F.softmax(attention_probs * mask, dim=1)
+        attention_probs = self.dropout(attention_probs)
+
+        # 为什么通过相加这个注意力分数
+        values = attention_probs + values # (bs, seq_len, hid_size)
+        values = values.repeat(1, 5, 1) # (bs, seq_len*5, hid_size)
+        bs, _, hs = values.shape
+        values = values.view(bs, 5, -1, hs) # (bs, 5, seq_len, hid_size)
+
+        mlm_mask_extend = torch.zeros_like(mlm_mask) # (bs,seq_len)
+        mlm_mask_extend = mlm_mask_extend.repeat(1,5).view(bs,5,-1) # (bs,5,seq_len)
+        end_idx = mlm_mask.sum(dim=-1) # (bs)
+        bs, sl = mlm_mask.shape
+        for i in range(bs):
+            start = 0
+            count = 0
+            for j in range(sl):
+                if mlm_mask[i][j] > 0:
+                    if start == 0:
+                        start = j
+                    else:
+                        mlm_mask_extend[i, count, start+1:j-1] = 1
+                        # mlm_mask_extend[i, count, start + 1:j] = 1
+                        start = j
+                        count += 1
+            mlm_mask_extend[i, count, start+1:end_idx[i]-1] = 1
+        mlm_mask_extend = mlm_mask_extend.unsqueeze(-1) # (bs, 5, seq_len, 1)
+        values = torch.mul(mlm_mask_extend, values) # (bs, 5, sl, hs)
+        context = torch.sum(values, dim=2) # (bs, 5, hs)
+        return context

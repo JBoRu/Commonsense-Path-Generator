@@ -2,10 +2,12 @@ import random
 
 import numpy
 import torch
+import copy
 from transformers import *
 
 from modeling.kg_encoder import *
-from modeling.models import LMRelationNet, PromptLMRelationNet, PromptWithClassifyLMRelationNet, PromptWithGenerateLMRelationNet
+from modeling.models import *
+# LMRelationNet, PromptLMRelationNet, PromptWithClassifyLMRelationNet, PromptWithGenerateLMRelationNet, PromptWithKCRClassify, PromptWithKCRGenerate
 from modeling.data_loader import *
 from utils.optimization_utils import OPTIMIZER_CLASSES
 from utils.parser_utils import *
@@ -40,6 +42,18 @@ def evaluate_accuracy_prompt(eval_set, model, type=None):
             # (bs*5, 2)
             logits, _ = model(*input_data, prompt_data=prompt_data, sample_ids=sample_ids, type=type)
             logits = logits[:, 1:2] # (bs*5) get the logit of YES
+            logits = logits.view(-1, 5) # (bs, 5)
+            n_correct += (logits.argmax(1) == labels).sum().item()
+            n_samples += labels.size(0)
+    return n_correct / n_samples
+
+def evaluate_accuracy_prompt_for_concat_choices(eval_set, model, type=None):
+    n_samples, n_correct = 0, 0
+    model.eval()
+    with torch.no_grad():
+        for sample_ids, qids, labels, *input_data,  prompt_data in eval_set:
+            # (bs*1, 5)
+            logits, _ = model(*input_data, prompt_data=prompt_data, sample_ids=sample_ids, type=type)
             logits = logits.view(-1, 5) # (bs, 5)
             n_correct += (logits.argmax(1) == labels).sum().item()
             n_samples += labels.size(0)
@@ -118,7 +132,7 @@ def freeze_and_unfreeze_net(model, args):
             freeze_net(model.decoder.rel_emb)
             freeze_net(model.decoder.concept_emb)
     else:
-        if args.input_format in ['soft_prompt_p_tuning','GPT_kg_generator_as_prompt', 'p-tuning-GPT-generate']:
+        if args.input_format in ['soft_prompt_p_tuning', 'GPT_kg_generator_as_prompt', 'p-tuning-GPT-generate']:
             unfreeze_net(model.decoder)
         elif args.input_format in ['soft_prompt_p_tuning_classify']:
             unfreeze_net(model.decoder)
@@ -187,79 +201,105 @@ def train(args):
     path_embedding_path = os.path.join('./path_embeddings/', args.dataset, 'path_embedding.pickle')
 
     # initialize dataloader
-    dataset = LMRelationNetDataLoader(args, path_embedding_path,
-                                      args.train_statements, args.train_rel_paths,
-                                      args.dev_statements, args.dev_rel_paths,
-                                      args.test_statements, args.test_rel_paths,
-                                      batch_size=args.batch_size, eval_batch_size=args.eval_batch_size,
-                                      device=device,
-                                      model_name=args.encoder,
-                                      max_tuple_num=args.max_tuple_num, max_seq_length=args.max_seq_len,
-                                      is_inhouse=args.inhouse, inhouse_train_qids_path=args.inhouse_train_qids,
-                                      use_contextualized=use_contextualized,
-                                      train_adj_path=args.train_adj, dev_adj_path=args.dev_adj,
-                                      test_adj_path=args.test_adj,
-                                      train_node_features_path=args.train_node_features,
-                                      dev_node_features_path=args.dev_node_features,
-                                      test_node_features_path=args.test_node_features, node_feature_type=args.node_feature_type)
+    if args.experiment_base == "p-tuning":
+        dataset = LMRelationNetDataLoader(args, path_embedding_path,
+                                          args.train_statements, args.train_rel_paths,
+                                          args.dev_statements, args.dev_rel_paths,
+                                          args.test_statements, args.test_rel_paths,
+                                          batch_size=args.batch_size, eval_batch_size=args.eval_batch_size,
+                                          device=device,
+                                          model_name=args.encoder,
+                                          max_tuple_num=args.max_tuple_num, max_seq_length=args.max_seq_len,
+                                          is_inhouse=args.inhouse, inhouse_train_qids_path=args.inhouse_train_qids,
+                                          use_contextualized=use_contextualized,
+                                          train_adj_path=args.train_adj, dev_adj_path=args.dev_adj,
+                                          test_adj_path=args.test_adj,
+                                          train_node_features_path=args.train_node_features,
+                                          dev_node_features_path=args.dev_node_features,
+                                          test_node_features_path=args.test_node_features, node_feature_type=args.node_feature_type)
+    elif args.experiment_base == "kcr":
+        dataset = KCRDataLoader(args, args.train_statements, args.dev_statements, args.test_statements,
+                                batch_size=args.batch_size, eval_batch_size=args.eval_batch_size,
+                                device=device, model_name=args.encoder, max_seq_length=args.max_seq_len,
+                                is_inhouse=args.inhouse, inhouse_train_qids_path=args.inhouse_train_qids)
 
     ###################################################################################################
     #   Build model                                                                                   #
     ###################################################################################################
 
     lstm_config = get_lstm_config_from_args(args)
-    if args.input_format in ['pg_kg_enc_as_prompt', 'manual_hard_prompt', 'soft_prompt_p_tuning', 'GPT_kg_generator_as_prompt']:
-        model = PromptLMRelationNet(args=args, model_name=args.encoder, label_list_len=2, from_checkpoint=args.from_checkpoint,
-                          concept_num=concept_num, concept_dim=relation_dim,
-                          relation_num=relation_num, relation_dim=relation_dim,
-                          concept_in_dim=(dataset.get_node_feature_dim() if use_contextualized else concept_dim),
-                          hidden_size=args.mlp_dim, num_hidden_layers=args.mlp_layer_num, prompt_token_num=args.prompt_token_num,
-                          fc_size=args.fc_dim, num_fc_layers=args.fc_layer_num, dropout=args.dropoutm,
-                          pretrained_concept_emb=cp_emb, pretrained_relation_emb=rel_emb, freeze_ent_emb=args.freeze_ent_emb,
-                          init_range=args.init_range, ablation=args.ablation, use_contextualized=use_contextualized,
-                          emb_scale=args.emb_scale)
-        freeze_and_unfreeze_net(model, args)
-    elif args.input_format in ['soft_prompt_p_tuning_classify']:
-        model = PromptWithClassifyLMRelationNet(args=args, model_name=args.encoder, label_list_len=2,
-                                    from_checkpoint=args.from_checkpoint,
-                                    concept_num=concept_num, concept_dim=relation_dim,
-                                    relation_num=relation_num, relation_dim=relation_dim,
-                                    concept_in_dim=(
-                                        dataset.get_node_feature_dim() if use_contextualized else concept_dim),
-                                    hidden_size=args.mlp_dim, num_hidden_layers=args.mlp_layer_num,
-                                    prompt_token_num=args.prompt_token_num,
-                                    fc_size=args.fc_dim, num_fc_layers=args.fc_layer_num, dropout=args.dropoutm,
-                                    pretrained_concept_emb=cp_emb, pretrained_relation_emb=rel_emb,
-                                    freeze_ent_emb=args.freeze_ent_emb,
-                                    init_range=args.init_range, ablation=args.ablation,
-                                    use_contextualized=use_contextualized,
-                                    emb_scale=args.emb_scale)
-        freeze_and_unfreeze_net(model, args)
-    elif args.input_format in ['p-tuning-GPT-generate']:
-        model = PromptWithGenerateLMRelationNet(args=args, model_name=args.encoder, label_list_len=2,
-                                    from_checkpoint=args.from_checkpoint,
-                                    concept_num=concept_num, concept_dim=relation_dim,
-                                    relation_num=relation_num, relation_dim=relation_dim,
-                                    concept_in_dim=(
-                                        dataset.get_node_feature_dim() if use_contextualized else concept_dim),
-                                    hidden_size=args.mlp_dim, num_hidden_layers=args.mlp_layer_num,
-                                    prompt_token_num=args.prompt_token_num,
-                                    fc_size=args.fc_dim, num_fc_layers=args.fc_layer_num, dropout=args.dropoutm,
-                                    pretrained_concept_emb=cp_emb, pretrained_relation_emb=rel_emb,
-                                    freeze_ent_emb=args.freeze_ent_emb,
-                                    init_range=args.init_range, ablation=args.ablation,
-                                    use_contextualized=use_contextualized,
-                                    emb_scale=args.emb_scale)
-        freeze_and_unfreeze_net(model, args)
-    elif args.input_format == 'path-generate':
-        model = LMRelationNet(model_name=args.encoder, from_checkpoint=args.from_checkpoint, concept_num=concept_num, concept_dim=relation_dim,
-                          relation_num=relation_num, relation_dim=relation_dim,
-                          concept_in_dim=(dataset.get_node_feature_dim() if use_contextualized else concept_dim),
-                          hidden_size=args.mlp_dim, num_hidden_layers=args.mlp_layer_num, num_attention_heads=args.att_head_num,
-                          fc_size=args.fc_dim, num_fc_layers=args.fc_layer_num, dropout=args.dropoutm,
-                          pretrained_concept_emb=cp_emb, pretrained_relation_emb=rel_emb, freeze_ent_emb=args.freeze_ent_emb,
-                          init_range=args.init_range, ablation=args.ablation, use_contextualized=use_contextualized,
-                          emb_scale=args.emb_scale, encoder_config=lstm_config)
+    if args.experiment_base == "p-tuning":
+        if args.input_format in ['pg_kg_enc_as_prompt', 'manual_hard_prompt', 'soft_prompt_p_tuning', 'GPT_kg_generator_as_prompt']:
+            model = PromptLMRelationNet(args=args, model_name=args.encoder, label_list_len=2, from_checkpoint=args.from_checkpoint,
+                              concept_num=concept_num, concept_dim=relation_dim,
+                              relation_num=relation_num, relation_dim=relation_dim,
+                              concept_in_dim=(dataset.get_node_feature_dim() if use_contextualized else concept_dim),
+                              hidden_size=args.mlp_dim, num_hidden_layers=args.mlp_layer_num, prompt_token_num=args.prompt_token_num,
+                              fc_size=args.fc_dim, num_fc_layers=args.fc_layer_num, dropout=args.dropoutm,
+                              pretrained_concept_emb=cp_emb, pretrained_relation_emb=rel_emb, freeze_ent_emb=args.freeze_ent_emb,
+                              init_range=args.init_range, ablation=args.ablation, use_contextualized=use_contextualized,
+                              emb_scale=args.emb_scale)
+            freeze_and_unfreeze_net(model, args)
+        elif args.input_format in ['soft_prompt_p_tuning_classify']:
+            model = PromptWithClassifyLMRelationNet(args=args, model_name=args.encoder, label_list_len=2,
+                                        from_checkpoint=args.from_checkpoint,
+                                        concept_num=concept_num, concept_dim=relation_dim,
+                                        relation_num=relation_num, relation_dim=relation_dim,
+                                        concept_in_dim=(
+                                            dataset.get_node_feature_dim() if use_contextualized else concept_dim),
+                                        hidden_size=args.mlp_dim, num_hidden_layers=args.mlp_layer_num,
+                                        prompt_token_num=args.prompt_token_num,
+                                        fc_size=args.fc_dim, num_fc_layers=args.fc_layer_num, dropout=args.dropoutm,
+                                        pretrained_concept_emb=cp_emb, pretrained_relation_emb=rel_emb,
+                                        freeze_ent_emb=args.freeze_ent_emb,
+                                        init_range=args.init_range, ablation=args.ablation,
+                                        use_contextualized=use_contextualized,
+                                        emb_scale=args.emb_scale)
+            freeze_and_unfreeze_net(model, args)
+        elif args.input_format in ['p-tuning-GPT-generate']:
+            model = PromptWithGenerateLMRelationNet(args=args, model_name=args.encoder, label_list_len=2,
+                                        from_checkpoint=args.from_checkpoint,
+                                        concept_num=concept_num, concept_dim=relation_dim,
+                                        relation_num=relation_num, relation_dim=relation_dim,
+                                        concept_in_dim=(
+                                            dataset.get_node_feature_dim() if use_contextualized else concept_dim),
+                                        hidden_size=args.mlp_dim, num_hidden_layers=args.mlp_layer_num,
+                                        prompt_token_num=args.prompt_token_num,
+                                        fc_size=args.fc_dim, num_fc_layers=args.fc_layer_num, dropout=args.dropoutm,
+                                        pretrained_concept_emb=cp_emb, pretrained_relation_emb=rel_emb,
+                                        freeze_ent_emb=args.freeze_ent_emb,
+                                        init_range=args.init_range, ablation=args.ablation,
+                                        use_contextualized=use_contextualized,
+                                        emb_scale=args.emb_scale)
+            freeze_and_unfreeze_net(model, args)
+        elif args.input_format == 'path-generate':
+            model = LMRelationNet(model_name=args.encoder, from_checkpoint=args.from_checkpoint, concept_num=concept_num, concept_dim=relation_dim,
+                              relation_num=relation_num, relation_dim=relation_dim,
+                              concept_in_dim=(dataset.get_node_feature_dim() if use_contextualized else concept_dim),
+                              hidden_size=args.mlp_dim, num_hidden_layers=args.mlp_layer_num, num_attention_heads=args.att_head_num,
+                              fc_size=args.fc_dim, num_fc_layers=args.fc_layer_num, dropout=args.dropoutm,
+                              pretrained_concept_emb=cp_emb, pretrained_relation_emb=rel_emb, freeze_ent_emb=args.freeze_ent_emb,
+                              init_range=args.init_range, ablation=args.ablation, use_contextualized=use_contextualized,
+                              emb_scale=args.emb_scale, encoder_config=lstm_config)
+    elif args.experiment_base == "kcr":
+        if args.input_format in ['soft_prompt_p_tuning_classify']:
+            if args.concat_choices:
+                model = PromptWithKCRWithConcatChoicesClassify(args=args, model_name=args.encoder, label_list_len=2,
+                                              from_checkpoint=args.from_checkpoint,
+                                              prompt_token_num=args.prompt_token_num,
+                                              init_range=args.init_range)
+            else:
+                model = PromptWithKCRClassify(args=args, model_name=args.encoder, label_list_len=2,
+                                                from_checkpoint=args.from_checkpoint,
+                                                prompt_token_num=args.prompt_token_num,
+                                                init_range=args.init_range)
+            freeze_and_unfreeze_net(model, args)
+        elif args.input_format in ['soft_prompt_p_tuning']:
+            model = PromptWithKCRGenerate(args=args, model_name=args.encoder, label_list_len=2,
+                                          from_checkpoint=args.from_checkpoint,
+                                          prompt_token_num=args.prompt_token_num,
+                                          init_range=args.init_range)
+            freeze_and_unfreeze_net(model, args)
 
     try:
         model.to(device)
@@ -307,15 +347,23 @@ def train(args):
         max_steps = int(args.n_epochs * (dataset.train_size() / args.batch_size))
         print("Using warmup linear with warmup steps: {} of max steps: {}".format(args.warmup_steps, max_steps))
         scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=args.warmup_steps, num_training_steps=max_steps)
-    elif 'warmup' in args.lr_schedule:
-        scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=args.warmup_steps, num_training_steps=args.max_steps)
+    elif args.lr_schedule == 'warmup_cosine_hard_restart':
+        max_steps = int(args.n_epochs * (dataset.train_size() / args.batch_size))
+        warmup_proportion = args.warmup_proportion
+        scheduler = get_cosine_with_hard_restarts_schedule_with_warmup(optimizer,)
+    elif args.lr_schedule == 'warmup_cosine':
+        max_steps = int(args.n_epochs * (dataset.train_size() / args.batch_size))
+        warmup_proportion = args.warmup_proportion
+        warmup_steps = int(max_steps*warmup_proportion)
+        scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=max_steps)
 
     print('parameters:')
     for name, param in model.named_parameters():
-        if param.requires_grad:
-            print('\t{:45}\ttrainable\t{}'.format(name, param.size()))
-        else:
-            print('\t{:45}\tfixed\t{}'.format(name, param.size()))
+        if ("encoder.layer." not in name) or "encoder.layer.0" in name:
+            if param.requires_grad:
+                print('\t{:45}\ttrainable\t{}'.format(name, param.size()))
+            else:
+                print('\t{:45}\tfixed\t{}'.format(name, param.size()))
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print('\ttotal:', num_params)
 
@@ -385,12 +433,18 @@ def train(args):
                 loss.backward()
                 total_loss += loss.item()
 
-            if (global_step + 1) % args.grad_step == 0:
+            # before = copy.deepcopy(model.encoder.embeddings.weight.data)
 
+            if (global_step + 1) % args.grad_step == 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
                 optimizer.step()
                 scheduler.step()  # Update learning rate schedule
                 optimizer.zero_grad()
+
+            # after = copy.deepcopy(model.encoder.embeddings.weight.data)
+            #
+            # if (after != before).sum():
+            #     print("Update!")
 
             if (global_step + 1) % args.log_interval == 0:
                 total_loss /= args.log_interval
@@ -405,8 +459,13 @@ def train(args):
 
         model.eval()
         if args.input_format in ['pg_kg_enc_as_prompt', 'manual_hard_prompt', 'soft_prompt_p_tuning', 'GPT_kg_generator_as_prompt']:
-            dev_acc = evaluate_accuracy_prompt(dataset.dev(), model, type='dev')
-            test_acc = evaluate_accuracy_prompt(dataset.test(), model, type='test') if dataset.test_size() > 0 else 0.0
+            if args.concat_choices:
+                dev_acc = evaluate_accuracy_prompt_for_concat_choices(dataset.dev(), model, type='dev')
+                test_acc = evaluate_accuracy_prompt_for_concat_choices(dataset.test(), model,
+                                                    type='test') if dataset.test_size() > 0 else 0.0
+            else:
+                dev_acc = evaluate_accuracy_prompt(dataset.dev(), model, type='dev')
+                test_acc = evaluate_accuracy_prompt(dataset.test(), model, type='test') if dataset.test_size() > 0 else 0.0
         elif args.input_format in ['soft_prompt_p_tuning_classify']:
             dev_acc = evaluate_accuracy_prompt_with_classify_head(dataset.dev(), model, type='dev')
             test_acc = evaluate_accuracy_prompt_with_classify_head(dataset.test(), model,

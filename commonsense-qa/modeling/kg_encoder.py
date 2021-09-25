@@ -332,7 +332,7 @@ class PromptKGEncoder(nn.Module):
 
 class SoftPromptEncoder(nn.Module):
 
-    def __init__(self, args, init_range, embed_size):
+    def __init__(self, args, init_range, embed_size, tokenizer=None, PLM_embeddings=None):
 
         super().__init__()
         self.args = args
@@ -354,6 +354,16 @@ class SoftPromptEncoder(nn.Module):
         if self.init_range > 0:
             self.apply(self._init_weights)
 
+        if args.prompt_embeddings_initialized:
+            pattern_class, pattern_idx = args.pattern_format.split("_")
+            if pattern_class == "soft-prompt-cls" and pattern_idx == "2":
+                hard_prompt = "Candidate answer is"
+                self.init_prompt_embeddings(hard_prompt, tokenizer, PLM_embeddings)
+            elif pattern_class == "soft-prompt-gen" and pattern_idx == "2":
+                hard_prompt = "</s>Is the answer?</s>, it is."
+                self.init_prompt_embeddings(hard_prompt, tokenizer, PLM_embeddings)
+
+
     def _init_weights(self, module):
         if isinstance(module, (nn.Linear, nn.Embedding)):
             module.weight.data.normal_(mean=0.0, std=self.init_range)
@@ -362,6 +372,20 @@ class SoftPromptEncoder(nn.Module):
         elif isinstance(module, nn.LayerNorm):
             module.bias.data.zero_()
             module.weight.data.fill_(1.0)
+
+    def init_prompt_embeddings(self, hard_prompt, tokenizer, PLM_embeddings):
+        hp_tokens = tokenizer.tokenize(hard_prompt)
+        hp_tokens = [i for i in hp_tokens if "</s>" not in i]
+        if "</s>" in hp_tokens:
+            print("The </s> should not in the tokenized list")
+        hp_idx = tokenizer.convert_tokens_to_ids(hp_tokens)
+        hp_idx = torch.tensor(hp_idx, dtype=torch.long)
+        num_sp = len(hp_tokens)
+        if num_sp != self.prompt_token_num:
+            print("Number of tokenized hard prompt tokens not equal to number of soft prompt embeddings.")
+        hp_emb = PLM_embeddings(hp_idx)
+        self.prompt_embeddings.to(PLM_embeddings.weight.data.device)
+        self.prompt_embeddings.weight.data = hp_emb
 
     def forward(self, device):
         replace_embeds = self.prompt_embeddings(

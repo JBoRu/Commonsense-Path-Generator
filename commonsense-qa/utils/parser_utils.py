@@ -57,9 +57,9 @@ def add_data_arguments(parser):
     parser.add_argument('--ir', default=0, type=int)
     parser.add_argument('--has_test', default=0, type=int)
     parser.add_argument('--do_pred', default=0, type=int)
-    parser.add_argument('--train_statements', default='./data/{dataset}/{ir}statement/train.statement.jsonl')
-    parser.add_argument('--dev_statements', default='./data/{dataset}/{ir}statement/dev.statement.jsonl')
-    parser.add_argument('--test_statements', default='./data/{dataset}/{ir}statement/test.statement.jsonl')
+    parser.add_argument('--train_statements', default='./data/{dataset}/{ir}statement/csqa_kcr/train.statement.jsonl')
+    parser.add_argument('--dev_statements', default='./data/{dataset}/{ir}statement/csqa_kcr/dev.statement.jsonl')
+    parser.add_argument('--test_statements', default='./data/{dataset}/{ir}statement/csqa_kcr/test.statement.jsonl')
     parser.add_argument('-ckpt', '--from_checkpoint', default='None', help='load from a checkpoint')
     # preprocessing options
     parser.add_argument('-sl', '--max_seq_len', default=64, type=int)
@@ -102,9 +102,10 @@ def add_encoder_arguments(parser):
 def add_optimization_arguments(parser):
     parser.add_argument('--loss', default='cross_entropy', choices=['margin_rank', 'cross_entropy'], help='model type')
     parser.add_argument('--optim', default='radam', choices=['sgd', 'adam', 'adamw', 'radam'], help='learning rate scheduler')
-    parser.add_argument('--lr_schedule', default='fixed', choices=['fixed', 'warmup_linear', 'warmup_constant'], help='learning rate scheduler')
+    parser.add_argument('--lr_schedule', default='fixed', help='learning rate scheduler')
     parser.add_argument('-bs', '--batch_size', default=32, type=int)
     parser.add_argument('--warmup_steps', type=float, default=150)
+    parser.add_argument('--warmup_proportion', type=float, default=0.1)
     parser.add_argument('--max_steps', type=int)
     parser.add_argument('--max_grad_norm', default=1.0, type=float, help='max grad norm (0 to disable)')
     parser.add_argument('--weight_decay', default=1e-2, type=float, help='l2 weight decay strength')
@@ -189,9 +190,13 @@ def get_parser():
     parser.add_argument('--emb_scale', default=1.0, type=float, help='scale pretrained embeddings')
     parser.add_argument('--lstm_split', default=0, type=int, help='whether to use lstm to model splited prompt tokems')
     parser.add_argument('--pattern_type', default=0, type=int, help='input pattern format')
+    parser.add_argument('--pattern_format', default=None, type=str, help='input pattern format')
     parser.add_argument('--using_lstm_mlp', default=1, type=int, help='wether to use lstm and mlp to model prompt tokens')
     parser.add_argument('--using_mlp', default=0, type=int, help='wether to use lstm and mlp to model prompt tokens')
-
+    parser.add_argument('--experiment_base', default="p-tuning", type=str, help='whether to use p-tuning based method or kcr based')
+    parser.add_argument('--using_attention_for_kcr', default=0, type=int, help='whether to use attention when classification')
+    parser.add_argument('--prompt_embeddings_initialized', default=0, type=int, help='whether to use hard prompt initialize')
+    parser.add_argument('--concat_choices', default=0, type=int, help='whether to concat choices')
 
     # regularization
     parser.add_argument('--dropoutm', type=float, default=0.3, help='dropout for mlp hidden units (0 = no dropout')

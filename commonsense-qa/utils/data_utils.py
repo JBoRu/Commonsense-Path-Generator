@@ -799,7 +799,8 @@ def load_bert_xlnet_roberta_input_tensors(args, statement_jsonl_path, model_type
                                      pad_on_left=False,
                                      pad_token=0,
                                      mask_padding_with_zero=True,
-                                     num_prompt_token=0):
+                                     num_prompt_token=0,
+                                     prompt_token=["PROMPT"]):
         ''' Loads a data file into a list of `InputBatch`s
             `cls_token_at_end` define the location of the CLS token:
                 - False (Default, BERT/XLM pattern): [CLS] + A + [SEP] + B + [SEP]
@@ -812,6 +813,7 @@ def load_bert_xlnet_roberta_input_tensors(args, statement_jsonl_path, model_type
         for ex_index, example in enumerate(examples):
             label = label_map[example.label]
             choices_features = []
+            # roberta: <s>Question is A?</s></s>Answer is B.</s>
             # for one sample
             for ending_idx, (context, ending) in enumerate(zip(example.contexts, example.endings)):
                 # experiment with p-tuning format!
@@ -873,7 +875,7 @@ def load_bert_xlnet_roberta_input_tensors(args, statement_jsonl_path, model_type
                             print("Using input pattern of 'q Is it c? sep p1 p2 p3 p4 p5 p6 [mask], it is!' ")
                         context = context  # context is question
                         ending = "Is it " + ending + "?"  # ending is choice
-                        soft_prompt = [mask_token for i in range(num_prompt_token)]
+                        soft_prompt = [prompt_token for i in range(num_prompt_token)]
                         soft_prompt = " ".join(soft_prompt)
                         masked = mask_token + ", it is!"
                         if sep_token_extra:
@@ -1117,23 +1119,1526 @@ def load_bert_xlnet_roberta_input_tensors(args, statement_jsonl_path, model_type
     elif model_type == 'roberta':
         path = '/mnt/nlp_model/huggingface/roberta-large/'
     tokenizer = tokenizer_class.from_pretrained(path)
+    prompt_token = '[PROMPT]'
+    tokenizer.add_special_tokens([prompt_token])
     examples = read_examples(statement_jsonl_path)
     features = convert_examples_to_features(args.pattern_type, examples, list(range(len(examples[0].endings))), max_seq_length, tokenizer,
                                             cls_token_at_end=bool(model_type in ['xlnet']),  # xlnet has a cls token at the end
                                             cls_token=tokenizer.cls_token,
                                             sep_token=tokenizer.sep_token,
-                                            sep_token_extra=bool(model_type in ['roberta', 'albert']),
+                                            sep_token_extra=bool(model_type in ['roberta']),
                                             mask_token=tokenizer.mask_token,
                                             cls_token_segment_id=2 if model_type in ['xlnet'] else 0,
                                             pad_on_left=bool(model_type in ['xlnet']),  # pad on the left for xlnet
                                             pad_token_segment_id=4 if model_type in ['xlnet'] else 0,
                                             sequence_b_segment_id=0 if model_type in ['roberta', 'albert'] else 1,
-                                            num_prompt_token=args.prompt_token_num)
+                                            num_prompt_token=args.prompt_token_num,
+                                            prompt_token=prompt_token)
     example_ids = [f.example_id for f in features]
     *data_tensors, all_label, prompt_data_tensors = convert_features_to_tensors(features)
     assert len(prompt_data_tensors) == 3, "Prompt data tensor error"
     return (example_ids, all_label, *data_tensors, prompt_data_tensors)
 
+def load_roberta_input_tensors(args, statement_jsonl_path, model_type, model_name, max_seq_length, num_prompt_token):
+    class InputExample(object):
+
+        def __init__(self, example_id, question, contexts, endings, label=None):
+            self.example_id = example_id
+            self.question = question
+            self.contexts = contexts
+            self.endings = endings
+            self.label = label
+
+    class InputFeatures(object):
+
+        def __init__(self, example_id, choices_features, label):
+            self.example_id = example_id
+            self.choices_features = [
+                {
+                    'input_ids': input_ids,
+                    'input_mask': input_mask,
+                    'segment_ids': segment_ids,
+                    'output_mask': output_mask,
+                    'block_flag': block_flag,
+                    'mlm_mask': mlm_mask,
+                    'mlm_label': mlm_label,
+                }
+                for _, input_ids, input_mask, segment_ids, output_mask, block_flag, mlm_mask, mlm_label in choices_features
+            ]
+            self.label = label
+
+    def read_examples(input_file):
+        with open(input_file, "r", encoding="utf-8") as f:
+            examples = []
+            for line in f.readlines():
+                json_dic = json.loads(line)
+                label = ord(json_dic["answerKey"]) - ord("A") if 'answerKey' in json_dic else 0
+                contexts = json_dic["question"]["stem"]
+                examples.append(
+                    InputExample(
+                        example_id=json_dic["id"],
+                        contexts=[contexts] * len(json_dic["question"]["choices"]),
+                        question="",
+                        endings=[ending["text"] for ending in json_dic["question"]["choices"]],
+                        label=label
+                    ))
+        return examples
+
+    def convert_examples_to_features(pattern_type, examples, label_list, max_seq_length, tokenizer, prompt_token="PROMPT"):
+        ''' Loads a data file into a list of `InputBatch`s
+            `cls_token_at_end` define the location of the CLS token:
+                - False (Default, BERT/XLM pattern): [CLS] + A + [SEP] + B + [SEP]
+                - True (XLNet/GPT pattern): A + [SEP] + B + [SEP] + [CLS]
+            `cls_token_segment_id` define the segment id associated to the CLS token (0 for BERT, 2 for XLNet) '''
+        # {0:0, 1:1, 2:2, 3:3, 4:4}
+        label_map = {label: i for i, label in enumerate(label_list)}
+        features = []
+        for ex_index, example in enumerate(examples):
+            label = label_map[example.label]
+            choices_features = []
+            # roberta: <s>Question is A?</s></s>Answer is B.</s>
+            # for one sample
+            for ending_idx, (context, ending) in enumerate(zip(example.contexts, example.endings)):
+                # experiment with p-tuning format!
+                if args.input_format in ['pg_kg_enc_as_prompt', 'GPT_kg_generator_as_prompt']:
+                    kg_prefix = "According to: "
+                    kg = [mask_token for i in range(num_prompt_token)]
+                    kg = " ".join(kg)
+                    context = ". Question: " + context # context is question
+                    ending = " Is it " + ending + "?" # ending is choice
+                    masked = " " + mask_token + ", it is!"
+                    sen_a = kg_prefix + kg + context + ending + masked
+
+                    tokens_a = tokenizer.tokenize(sen_a)
+                    # print("Debug: sentence a is ", sen_a)
+                    # print("Debug: tokenized sentence a is ", tokens_a)
+                    tokens_b = []
+                elif args.input_format == 'path-gen':
+                    tokens_a = tokenizer.tokenize(context)
+                    tokens_b = tokenizer.tokenize(example.question + " " + ending)
+                elif args.input_format == 'manual_hard_prompt':
+                    if ex_index == ending_idx == 0:
+                        print("Using input pattern of 'Question: q Is it c? [mask], it is!' ")
+                    context = "Question: " + context  # context is question
+                    ending = " Is it " + ending + "?"  # ending is choice
+                    masked = " " + mask_token + ", it is!"
+                    sen_a = context + ending + masked
+
+                    tokens_a = tokenizer.tokenize(sen_a)
+                    # print("Debug: sentence a is ", sen_a)
+                    # print("Debug: tokenized sentence a is ", tokens_a)
+                    tokens_b = []
+                elif args.input_format in ['soft_prompt_p_tuning', 'soft_prompt_p_tuning_classify']:
+                    # no prompt gen
+                    if pattern_type == -1:
+                        if ex_index == ending_idx == 0:
+                            print("Using input pattern of '<s>question</s></s>answer</s></s>[mask]</s>' ")
+                        context = context  # context is question
+                        ending = ending  # ending is choice
+                        masked = tokenizer.mask_token
+                        input = tokenizer.cls_token + context + tokenizer.sep_token + tokenizer.sep_token + ending + tokenizer.sep_token + tokenizer.sep_token + masked + tokenizer.sep_token
+                    # no prompt cls
+                    elif pattern_type == 5:
+                        if ex_index == ending_idx == 0:
+                            print("Using input pattern of '<s>question</s></s>answer</s>' ")
+                        context = context  # context is question
+                        ending = ending  # ending is choice
+                        masked = tokenizer.mask_token
+                        input = tokenizer.cls_token + context + tokenizer.sep_token + tokenizer.sep_token + ending + tokenizer.sep_token
+                    # hard prompt gen
+                    elif pattern_type == 6:
+                        if ex_index == ending_idx == 0:
+                            print("Using input pattern of 'Question: q Is it c? [mask], it is' ")
+                        context = "Question: " + context  # context is question
+                        ending = "Is it " + ending + "?"  # ending is choice
+                        masked = " " + mask_token + ", it is!"
+                        sen_a = context + " " + ending + masked
+                    # hard prompt gen from 6
+                    elif pattern_type == 8:
+                        if ex_index == ending_idx == 0:
+                            print("Using input pattern of 'q <sep> Is it c? [mask], it is' ")
+                        context = context  # context is question
+                        ending = "Is it " + ending + "?"  # ending is choice
+                        masked = mask_token + ", it is!"
+                        if sep_token_extra:
+                            sen_a = context + " " + sep_token + " " + sep_token + " " + ending + " " + masked
+                        else:
+                            sen_a = context + " " + sep_token + " " + ending + " " + masked
+                        sen_a = sen_a.lower()
+                    # hard prompt cls
+                    elif pattern_type == 7:
+                        if ex_index == ending_idx == 0:
+                            print("Using input pattern of 'Question: q <sep> Anser: c' ")
+                        context = "Question: " + context  # context is question
+                        ending = "Answer: " + ending  # ending is choice
+                        sen_a = context + " " + ending
+                    # hard prompt cls from 7
+                    elif pattern_type == 9:
+                        if ex_index == ending_idx == 0:
+                            print("Using input pattern of 'q <sep> candidate answer is c' ")
+                        context = context  # context is question
+                        ending = "Candidate Answer is " + ending + "."  # ending is choice
+                        if sep_token_extra:
+                            sen_a = context + " " + sep_token + " " + sep_token + " " + ending
+                        else:
+                            sen_a = context + " " + sep_token + " " + ending
+                        sen_a = sen_a.lower()
+                    # soft prompt gen
+                    elif pattern_type == 0:
+                        if ex_index == ending_idx == 0:
+                            print("Using input pattern of 'Question: q Is it c? p1 p2 p3 p4 p5 p6 [mask]' ")
+                        context = "Question: " + context  # context is question
+                        ending = "Is it " + ending + "?"  # ending is choice
+                        soft_prompt = [mask_token for i in range(num_prompt_token)]
+                        soft_prompt = " ".join(soft_prompt)
+                        soft_prompt = soft_prompt
+                        masked = mask_token + ", it is!"
+                        sen_a = context + " " + ending + " " + soft_prompt + " " + masked
+                    # soft prompt gen for 0
+                    elif pattern_type == 10:
+                        if ex_index == ending_idx == 0:
+                            print("Using input pattern of 'q Is it c? sep p1 p2 p3 p4 p5 p6 [mask], it is!' ")
+                        context = context  # context is question
+                        ending = "Is it " + ending + "?"  # ending is choice
+                        soft_prompt = [prompt_token for i in range(num_prompt_token)]
+                        soft_prompt = " ".join(soft_prompt)
+                        masked = mask_token + ", it is!"
+                        if sep_token_extra:
+                            sen_a = context + " " + ending + " " + sep_token + " " + sep_token + " " + soft_prompt + " " + masked
+                        else:
+                            sen_a = context + " " + ending + " " + sep_token + " " + soft_prompt + " " + masked
+                        sen_a = sen_a.lower()
+                    # soft prompt gen
+                    elif pattern_type == 1:
+                        if ex_index == ending_idx == 0:
+                            print("Using input pattern of 'p1 p2 p3 Question: q Answer: c p4 p5 p6 [mask]' ")
+                        context = "Question: " + context  # context is question
+                        ending = "Answer: " + ending  # ending is choice
+                        soft_prompt = [mask_token for i in range(int(num_prompt_token/2))]
+                        soft_prompt = " ".join(soft_prompt)
+                        # soft_prompt = " " + soft_prompt
+                        masked = " " + mask_token
+                        sen_a = soft_prompt + " " + context + " " + ending + " " + soft_prompt + masked
+                    # soft prompt gen
+                    elif pattern_type == 2:
+                        if ex_index == ending_idx == 0:
+                            print("Using input pattern of 'p1 p2 p3 Question: q Is it c? p4 p5 p6 [mask]' ")
+                        context = "Question: " + context  # context is question
+                        ending = "Is it " + ending + "?"  # ending is choice
+                        soft_prompt = [mask_token for i in range(int(num_prompt_token / 2))]
+                        soft_prompt = " ".join(soft_prompt)
+                        masked = " " + mask_token + ", it is!"
+                        sen_a = soft_prompt + " " + context + " " + ending + " " + soft_prompt + masked
+                    # soft prompt gen
+                    elif pattern_type == 3:
+                        if ex_index == ending_idx == 0:
+                            print("Using input pattern of 'p1 p2 p3 Question: q Is it c? [mask]' ")
+                        context = "Question: " + context  # context is question
+                        ending = "Is it " + ending + "?"  # ending is choice
+                        soft_prompt = [mask_token for i in range(num_prompt_token)]
+                        soft_prompt = " ".join(soft_prompt)
+                        masked = " " + mask_token + ", it is!"
+                        sen_a = soft_prompt + " " + context + " " + ending + masked
+                    # soft prompt gen
+                    elif pattern_type == 11:
+                        if ex_index == ending_idx == 0:
+                            print(
+                                "Using input pattern of '<s>question</s></s>Candidate answer is c. _ _ _ _ _ _ [mask], it is.</s>' ")
+                        context = context  # context is question
+                        ending = "Candidate Answer is " + ending + "."  # ending is choice
+                        soft_prompt = [prompt_token for i in range(num_prompt_token)]
+                        soft_prompt = " ".join(soft_prompt)
+                        masked = tokenizer.mask_token + ", it is."
+                        input = tokenizer.cls_token + context + tokenizer.sep_token + tokenizer.sep_token + ending + " " + soft_prompt + " " + masked + tokenizer.sep_token
+                    # soft prompt cls
+                    elif pattern_type == 4:
+                        if ex_index == ending_idx == 0:
+                            print("Using input pattern of '<s>_ _ _ _ _ _ question</s></s>Candidate answer is c.</s>' ")
+                        context = context  # context is question
+                        ending = "Candidate Answer is " + ending + "."
+                        soft_prompt = [prompt_token for i in range(num_prompt_token)]
+                        soft_prompt = " ".join(soft_prompt)
+                        input = tokenizer.cls_token + soft_prompt + " " + context + tokenizer.sep_token + tokenizer.sep_token + ending + tokenizer.sep_token
+
+                    input_tokens = tokenizer.tokenize(input)
+
+                # convert to ids
+                input_ids = tokenizer.convert_tokens_to_ids(input_tokens)
+                segment_ids = [0] * len(input_ids)
+
+                # The mask has 1 for real tokens and 0 for padding tokens. Only real tokens are attended to.
+                input_mask = [1] * len(input_ids)
+                special_token_id = tokenizer.convert_tokens_to_ids([tokenizer.cls_token, tokenizer.sep_token])
+                output_mask = [1 if id in special_token_id else 0 for id in input_ids]  # 1 for mask
+
+                # get the mask position, the first is used for insert prompt, the second is used for prediction
+                mask_token_id = tokenizer.convert_tokens_to_ids([tokenizer.mask_token])
+                mask_token_index = [index for index, id in enumerate(input_ids) if id in mask_token_id]
+                prompt_token_id = tokenizer.convert_tokens_to_ids([prompt_token])
+                prompt_token_index = [index for index, id in enumerate(input_ids) if id in prompt_token_id]
+
+                block_flag = [0]*len(input_ids)
+                mlm_mask = [0]*len(input_ids)
+                if args.input_format in ['pg_kg_enc_as_prompt', 'soft_prompt_p_tuning', 'soft_prompt_p_tuning_classify', 'GPT_kg_generator_as_prompt']:
+                    if pattern_type == 4: # no mask token and use cls at the head position
+                        for idx in prompt_token_index:
+                            block_flag[idx] = 1  # 1 for prompt placeholder
+                        mlm_mask[0] = 1
+                    elif pattern_type == 5: # no prompt for class
+                        mlm_mask[0] = 1
+                    elif pattern_type in [7,9]: # hard prompt fot  class
+                        mlm_mask[0] = 1
+                    elif pattern_type == -1: # no prompt for gen
+                        mlm_mask[mask_token_index[0]] = 1
+                    elif pattern_type in [6, 8]: # hard prompt for gen
+                        mlm_mask[mask_token_index[0]] = 1
+                    else: # soft ptompt gen
+                        for idx in prompt_token_index:
+                            block_flag[idx] = 1  # 1 for prompt placeholder
+                        mlm_mask[mask_token_index[0]] = 1 # 1 for masked token
+                elif args.input_format == 'manual_hard_prompt':
+                    if len(mask_token_index) == 1:
+                        mlm_mask[mask_token_index[-1]] = 1  # 1 for masked token
+                    else:
+                        print("There are more than 1 mask in manual_hard_prompt format!")
+
+
+                # Zero-pad up to the sequence length.
+                padding_length = max_seq_length - len(input_ids)
+                input_ids = input_ids + ([tokenizer.pad_token_id] * padding_length)
+                input_mask = input_mask + ([0] * padding_length)
+                output_mask = output_mask + ([1] * padding_length)
+                segment_ids = segment_ids + ([0] * padding_length)
+                block_flag = block_flag + ([0] * padding_length)
+                mlm_mask = mlm_mask + ([0] * padding_length)
+
+
+                assert len(input_ids) == max_seq_length
+                assert len(output_mask) == max_seq_length
+                assert len(input_mask) == max_seq_length
+                assert len(segment_ids) == max_seq_length
+                assert len(block_flag) == max_seq_length
+                assert len(mlm_mask) == max_seq_length
+                mlm_label = 1 if ending_idx == label else 0
+                choices_features.append((input_tokens, input_ids, input_mask, segment_ids, output_mask, block_flag, mlm_mask, mlm_label))
+            features.append(InputFeatures(example_id=example.example_id, choices_features=choices_features, label=label))
+
+        return features
+
+    def _truncate_seq_pair(tokens_a, tokens_b, max_length):
+        """Truncates a sequence pair in place to the maximum length."""
+
+        # This is a simple heuristic which will always truncate the longer sequence
+        # one token at a time. This makes more sense than truncating an equal percent
+        # of tokens from each, since if one sequence is very short then each token
+        # that's truncated likely contains more information than a longer sequence.
+        while True:
+            total_length = len(tokens_a) + len(tokens_b)
+            if total_length <= max_length:
+                break
+            if len(tokens_a) > len(tokens_b):
+                tokens_a.pop()
+            else:
+                tokens_b.pop()
+
+    def select_field(features, field):
+        return [[choice[field] for choice in feature.choices_features] for feature in features]
+
+    def convert_features_to_tensors(features):
+        # (bs, 5, max_len)
+        all_input_ids = torch.tensor(select_field(features, 'input_ids'), dtype=torch.long)
+        all_input_mask = torch.tensor(select_field(features, 'input_mask'), dtype=torch.long)
+        all_segment_ids = torch.tensor(select_field(features, 'segment_ids'), dtype=torch.long)
+        all_output_mask = torch.tensor(select_field(features, 'output_mask'), dtype=torch.uint8)
+        all_block_flag = torch.tensor(select_field(features, 'block_flag'), dtype=torch.long)
+        all_mlm_mask = torch.tensor(select_field(features, 'mlm_mask'), dtype=torch.long)
+        # (bs, 5)
+        all_mlm_label = torch.tensor(select_field(features, 'mlm_label'), dtype=torch.long)
+        # (bs)
+        all_label = torch.tensor([f.label for f in features], dtype=torch.long)
+        return all_input_ids, all_input_mask, all_segment_ids, all_output_mask, all_label, (all_block_flag, all_mlm_mask, all_mlm_label)
+
+    path = '/mnt/nlp_model/huggingface/roberta-large/'
+    tokenizer = RobertaTokenizer.from_pretrained(path)
+    prompt_token = '[PROMPT]'
+    tokenizer.add_tokens([prompt_token])
+    examples = read_examples(statement_jsonl_path)
+    features = convert_examples_to_features(args.pattern_type, examples, list(range(len(examples[0].endings))), max_seq_length, tokenizer, prompt_token=prompt_token)
+    example_ids = [f.example_id for f in features]
+    *data_tensors, all_label, prompt_data_tensors = convert_features_to_tensors(features)
+    assert len(prompt_data_tensors) == 3, "Prompt data tensor error"
+    return (example_ids, all_label, *data_tensors, prompt_data_tensors)
+
+def load_roberta_input_tensors_for_kcr(args, statement_jsonl_path, model_type, model_name, max_seq_length, num_prompt_token):
+    class InputExample(object):
+
+        def __init__(self, example_id, question, contexts, endings, triples, label=None):
+            self.example_id = example_id
+            self.question = question
+            self.contexts = contexts
+            self.endings = endings
+            self.triples = triples
+            self.label = label
+
+    class InputFeatures(object):
+
+        def __init__(self, example_id, choices_features, label):
+            self.example_id = example_id
+            self.choices_features = [
+                {
+                    'input_ids': input_ids,
+                    'input_mask': input_mask,
+                    'segment_ids': segment_ids,
+                    'output_mask': output_mask,
+                    'block_flag': block_flag,
+                    'mlm_mask': mlm_mask,
+                    'mlm_label': mlm_label,
+                }
+                for _, input_ids, input_mask, segment_ids, output_mask, block_flag, mlm_mask, mlm_label in choices_features
+            ]
+            self.label = label
+
+    def read_examples(input_file):
+        with open(input_file, "r", encoding="utf-8") as f:
+            all = json.load(f)
+            examples = []
+            for json_dic in all:
+                choices = json_dic['question']['choices']
+                question_concept = json_dic['question']['question_concept']
+                label = ord(json_dic["answerKey"]) - ord("A") if 'answerKey' in json_dic else 0
+                context = json_dic["question"]["stem"]
+
+                triples = []
+                endings = []
+                contexts = []
+                for i in range(len(choices)):
+                    choice = choices[i]
+                    if choice['triple']:
+                        triple_str = ' '.join(choice['triple'][0])
+                        triples_temp = triple_str
+                    else:
+                        triples_temp = question_concept + tokenizer.sep_token + tokenizer.sep_token + choice['text']
+                    triples.append(triples_temp)
+                    endings.append(choice['text'])
+                    contexts.append(context)
+                examples.append(
+                    InputExample(
+                        example_id=json_dic["id"],
+                        contexts=contexts,
+                        question="",
+                        endings=endings,
+                        triples=triples,
+                        label=label
+                    ))
+        return examples
+
+    def convert_examples_to_features(pattern_type, examples, label_list, max_seq_length, tokenizer, prompt_token="PROMPT"):
+        ''' Loads a data file into a list of `InputBatch`s
+            `cls_token_at_end` define the location of the CLS token:
+                - False (Default, BERT/XLM pattern): [CLS] + A + [SEP] + B + [SEP]
+                - True (XLNet/GPT pattern): A + [SEP] + B + [SEP] + [CLS]
+            `cls_token_segment_id` define the segment id associated to the CLS token (0 for BERT, 2 for XLNet) '''
+        # {0:0, 1:1, 2:2, 3:3, 4:4}
+        label_map = {label: i for i, label in enumerate(label_list)}
+        features = []
+        pattern_class, pattern_idx = pattern_type.split("_")
+        for ex_index, example in enumerate(examples):
+            label = label_map[example.label]
+            choices_features = []
+            cdx_list = ["A", "B", "C", "D", "E"]
+            if pattern_class == "hard-prompt-gen" and pattern_idx == "1":
+                # <s>question</s></s>c1 t1</s></s>c2 t2</s></s>c3 t3</s></s>Is the right answer c1. [MASK]</s>
+                input = tokenizer.cls_token
+                sep_token = tokenizer.sep_token
+                for ending_idx, (context, ending, triple, cdx) in enumerate(
+                        zip(example.contexts, example.endings, example.triples, cdx_list)):
+                    choice_feature = ending + ": " + triple
+                    if ending_idx == 0:
+                        input = input + context + sep_token + sep_token + choice_feature
+                    else:
+                        input = input + sep_token + sep_token + choice_feature
+                prefix = input + sep_token + sep_token
+            # roberta: <s>Question is A?</s></s>Answer is B.</s>
+            # for one sample
+            for ending_idx, (context, ending, triple) in enumerate(zip(example.contexts, example.endings, example.triples)):
+                # no prompt cls
+                if pattern_class == "no-prompt-cls":
+                    if pattern_idx == "0":
+                        input = tokenizer.cls_token + context + tokenizer.sep_token + tokenizer.sep_token + triple + tokenizer.sep_token
+                        input_tokens = tokenizer.tokenize(input)
+                elif pattern_class == "hard-prompt-cls":
+                    if pattern_idx == "0":
+                        # <s>question</s></s>Candidate answer is choice.</s></s>triple</s>
+                        context = context
+                        triple = triple
+                        choice = "Candidate answer is " + ending + "."
+                        input = tokenizer.cls_token + context + tokenizer.sep_token + tokenizer.sep_token + \
+                                choice + tokenizer.sep_token + tokenizer.sep_token + \
+                                triple + tokenizer.sep_token
+                        input_tokens = tokenizer.tokenize(input)
+                    elif pattern_idx == "1":
+                        # <s>question</s></s>According to: triple</s></s>Candidate answer is choice.</s>
+                        context = context
+                        triple = "According to: " + triple + "."
+                        choice = "Candidate answer is " + ending + "."
+                        input = tokenizer.cls_token + context + tokenizer.sep_token + tokenizer.sep_token + \
+                                triple + tokenizer.sep_token + tokenizer.sep_token + \
+                                choice + tokenizer.sep_token
+                        input_tokens = tokenizer.tokenize(input)
+                elif pattern_class == "hard-prompt-gen":
+                    if pattern_idx == "0":
+                        # <s>question</s></s>According to triple</s></s>Is choice the answer? [MASK], it is.
+                        context = context
+                        triple = "According to " + triple
+                        choice = "Is " + ending + " the answer?"
+                        mask = tokenizer.mask_token + ", it is."
+                        input = tokenizer.cls_token + context + tokenizer.sep_token + tokenizer.sep_token + \
+                                triple + tokenizer.sep_token + tokenizer.sep_token + choice + \
+                                " " + mask + tokenizer.sep_token
+                        input_tokens = tokenizer.tokenize(input)
+                    elif pattern_idx == "1":
+                        # <s>question</s></s>c1 t1</s></s>c2 t2</s></s>c3 t3</s></s>According to the choices, is the right answer c1. [MASK]</s>
+                        context = prefix
+                        choice = "According to the choices, is " + ending + " the right answer?"
+                        mask = tokenizer.mask_token
+                        input = context + choice + mask + tokenizer.sep_token
+                        input_tokens = tokenizer.tokenize(input)
+                elif pattern_class == "soft-prompt-cls":
+                    if pattern_idx == "0":
+                        # <s>question</s></s>triple</s></s>_ _ _ _ _ _Candidate answer is choice.
+                        context = context
+                        triple = triple
+                        choice = "Candidate answer is " + ending + "."
+                        soft_prompt = " ".join([prompt_token for i in range(num_prompt_token)])
+                        input = tokenizer.cls_token + context + tokenizer.sep_token + tokenizer.sep_token + \
+                                triple + tokenizer.sep_token + tokenizer.sep_token + \
+                                " " + soft_prompt + " " + choice + tokenizer.sep_token
+                        input_tokens = tokenizer.tokenize(input)
+                    elif pattern_idx == "1":
+                        # <s>question</s></s>triple</s></s>_ _ _ choice _ _ _ .
+                        context = context
+                        triple = triple
+                        choice = ending
+                        soft_prompt_1 = " ".join([prompt_token for i in range(0, int(num_prompt_token/2))])
+                        soft_prompt_2 = " ".join([prompt_token for i in range(int(num_prompt_token/2), num_prompt_token)])
+                        input = tokenizer.cls_token + context + tokenizer.sep_token + tokenizer.sep_token + \
+                                triple + tokenizer.sep_token + tokenizer.sep_token + soft_prompt_1 + " " + choice + \
+                                " " + soft_prompt_2 + tokenizer.sep_token
+                        input_tokens = tokenizer.tokenize(input)
+                    elif pattern_idx == "2":
+                        # <s>question</s></s>_ _ _ _ choice</s></s>triple</s> (initialized with hard prompt embeddings)
+                        context = context
+                        triple = triple
+                        choice = ending
+                        soft_prompt = " ".join([prompt_token for i in range(num_prompt_token)])
+                        input = tokenizer.cls_token + context + tokenizer.sep_token + tokenizer.sep_token + \
+                                soft_prompt + choice + tokenizer.sep_token + tokenizer.sep_token + \
+                                triple + tokenizer.sep_token
+                        input_tokens = tokenizer.tokenize(input)
+                elif pattern_class == "soft-prompt-gen":
+                    if pattern_idx == "0":
+                        # <s>question</s></s>triple</s></s>Is choice the answer? _ _ _ _ _ _ [MASK].
+                        context = context
+                        triple = triple
+                        choice = "Is " + ending + " the answer?"
+                        mask = tokenizer.mask_token + "."
+                        soft_prompt = " ".join([prompt_token for i in range(num_prompt_token)])
+                        input = tokenizer.cls_token + context + tokenizer.sep_token + tokenizer.sep_token + \
+                                triple + tokenizer.sep_token + tokenizer.sep_token + choice + \
+                                soft_prompt + mask + tokenizer.sep_token
+                        input_tokens = tokenizer.tokenize(input)
+                    elif pattern_idx == "1":
+                        # <s>question</s></s>triple</s></s>_ _ _ choice _ _ _ [MASK].
+                        context = context
+                        triple = triple
+                        choice = ending
+                        mask = tokenizer.mask_token + "."
+                        soft_prompt = " ".join([prompt_token for i in range(int(num_prompt_token/2))])
+                        input = tokenizer.cls_token + context + tokenizer.sep_token + tokenizer.sep_token + \
+                                triple + tokenizer.sep_token + tokenizer.sep_token + soft_prompt + " " + choice + \
+                                " " + soft_prompt + " " + mask
+                        input_tokens = tokenizer.tokenize(input)
+                    elif pattern_idx == "2":
+                        # <s>question</s></s>triple</s></s>_ choice _ _ _ [MASK], it is. (initialized with hp)
+                        context = context
+                        triple = triple
+                        choice = ending
+                        mask = tokenizer.mask_token
+                        soft_prompt_1 = " ".join([prompt_token for i in range(0,1)]) # is
+                        soft_prompt_2 = " ".join([prompt_token for i in range(1, 4)]) # the answer?
+                        soft_prompt_3 = " ".join([prompt_token for i in range(4, num_prompt_token)]) # , it is.
+                        input = tokenizer.cls_token + context + tokenizer.sep_token + tokenizer.sep_token + \
+                                triple + tokenizer.sep_token + tokenizer.sep_token + soft_prompt_1 + " " + choice + \
+                                " " + soft_prompt_2 + " " + mask + " " + soft_prompt_3 + tokenizer.sep_token
+                        input_tokens = tokenizer.tokenize(input)
+                    elif pattern_idx == "3":
+                        # <s>_ _ _ _ _ _ _</s></s>question</s></s>triple</s></s>Is choice the answer?[MASK].
+                        context = context
+                        triple = triple
+                        choice = "Is " + ending + " the answer?"
+                        mask = tokenizer.mask_token + "."
+                        soft_prompt = " ".join([prompt_token for i in range(num_prompt_token)])
+                        input = tokenizer.cls_token + soft_prompt + tokenizer.sep_token + tokenizer.sep_token + \
+                                context + tokenizer.sep_token + tokenizer.sep_token + \
+                                triple + tokenizer.sep_token + tokenizer.sep_token + \
+                                choice + mask + tokenizer.sep_token
+                        input_tokens = tokenizer.tokenize(input)
+
+                if ex_index == ending_idx == 0:
+                    print("Tokenized tokens is:")
+                    print(input_tokens)
+                    input_ids = tokenizer.convert_tokens_to_ids(input_tokens)
+                    ori = tokenizer.decode(input_ids)
+                    print("Using input pattern of %s "%(ori))
+
+
+                # convert to ids
+                input_ids = tokenizer.convert_tokens_to_ids(input_tokens)
+                # not use segment_ids, only keep format consistent.
+                segment_ids = [0] * len(input_ids)
+
+                # The mask has 1 for real tokens and 0 for padding tokens. Only real tokens are attended to.
+                input_mask = [1] * len(input_ids)
+                special_token_id = tokenizer.convert_tokens_to_ids([tokenizer.cls_token, tokenizer.sep_token])
+                output_mask = [1 if id in special_token_id else 0 for id in input_ids]  # 1 for mask
+
+                # get the mask position, the first is used for insert prompt, the second is used for prediction
+                mask_token_id = tokenizer.convert_tokens_to_ids([tokenizer.mask_token])
+                mask_token_index = [index for index, id in enumerate(input_ids) if id in mask_token_id]
+                prompt_token_id = tokenizer.convert_tokens_to_ids([prompt_token])
+                prompt_token_index = [index for index, id in enumerate(input_ids) if id in prompt_token_id]
+
+                block_flag = [0]*len(input_ids)
+                mlm_mask = [0]*len(input_ids)
+                if pattern_class == "no-prompt-cls":
+                    if pattern_idx == "0":
+                        mlm_mask[0] = 1
+                elif pattern_class == "hard-prompt-cls":
+                    if pattern_idx == "0":
+                        mlm_mask[0] = 1
+                elif pattern_class == "hard-prompt-gen":
+                    mlm_mask[mask_token_index[0]] = 1 # 1 for masked token
+                elif pattern_class == "soft-prompt-cls":
+                    for idx in prompt_token_index:
+                        block_flag[idx] = 1  # 1 for prompt placeholder
+                    mlm_mask[0] = 1
+                elif pattern_class == "soft-prompt-gen":
+                    for idx in prompt_token_index:
+                        block_flag[idx] = 1  # 1 for prompt placeholder
+                    mlm_mask[mask_token_index[0]] = 1 # 1 for masked token
+
+
+                # Zero-pad up to the sequence length.
+                padding_length = max_seq_length - len(input_ids)
+                input_ids = input_ids + ([tokenizer.pad_token_id] * padding_length)
+                input_mask = input_mask + ([0] * padding_length)
+                output_mask = output_mask + ([1] * padding_length)
+                segment_ids = segment_ids + ([0] * padding_length)
+                block_flag = block_flag + ([0] * padding_length)
+                mlm_mask = mlm_mask + ([0] * padding_length)
+
+
+                assert len(input_ids) == max_seq_length
+                assert len(output_mask) == max_seq_length
+                assert len(input_mask) == max_seq_length
+                assert len(segment_ids) == max_seq_length
+                assert len(block_flag) == max_seq_length
+                assert len(mlm_mask) == max_seq_length
+                mlm_label = 1 if ending_idx == label else 0
+                choices_features.append((input_tokens, input_ids, input_mask, segment_ids, output_mask, block_flag, mlm_mask, mlm_label))
+            features.append(InputFeatures(example_id=example.example_id, choices_features=choices_features, label=label))
+
+        return features
+
+    def _truncate_seq_pair(tokens_a, tokens_b, max_length):
+        """Truncates a sequence pair in place to the maximum length."""
+
+        # This is a simple heuristic which will always truncate the longer sequence
+        # one token at a time. This makes more sense than truncating an equal percent
+        # of tokens from each, since if one sequence is very short then each token
+        # that's truncated likely contains more information than a longer sequence.
+        while True:
+            total_length = len(tokens_a) + len(tokens_b)
+            if total_length <= max_length:
+                break
+            if len(tokens_a) > len(tokens_b):
+                tokens_a.pop()
+            else:
+                tokens_b.pop()
+
+    def select_field(features, field):
+        return [[choice[field] for choice in feature.choices_features] for feature in features]
+
+    def convert_features_to_tensors(features):
+        # (bs, 5, max_len)
+        all_input_ids = torch.tensor(select_field(features, 'input_ids'), dtype=torch.long)
+        all_input_mask = torch.tensor(select_field(features, 'input_mask'), dtype=torch.long)
+        all_segment_ids = torch.tensor(select_field(features, 'segment_ids'), dtype=torch.long)
+        all_output_mask = torch.tensor(select_field(features, 'output_mask'), dtype=torch.uint8)
+        all_block_flag = torch.tensor(select_field(features, 'block_flag'), dtype=torch.long)
+        all_mlm_mask = torch.tensor(select_field(features, 'mlm_mask'), dtype=torch.long)
+        # (bs, 5)
+        all_mlm_label = torch.tensor(select_field(features, 'mlm_label'), dtype=torch.long)
+        # (bs)
+        all_label = torch.tensor([f.label for f in features], dtype=torch.long)
+        return all_input_ids, all_input_mask, all_segment_ids, all_output_mask, all_label, (all_block_flag, all_mlm_mask, all_mlm_label)
+
+    path = '/mnt/nlp_model/huggingface/roberta-large/'
+    tokenizer = RobertaTokenizer.from_pretrained(path)
+    prompt_token = '[PROMPT]'
+    tokenizer.add_tokens([prompt_token])
+    examples = read_examples(statement_jsonl_path)
+    features = convert_examples_to_features(args.pattern_format, examples, list(range(len(examples[0].endings))), max_seq_length, tokenizer, prompt_token=prompt_token)
+    example_ids = [f.example_id for f in features]
+    *data_tensors, all_label, prompt_data_tensors = convert_features_to_tensors(features)
+    assert len(prompt_data_tensors) == 3, "Prompt data tensor error"
+    return (example_ids, all_label, *data_tensors, prompt_data_tensors)
+
+def load_albert_input_tensors_for_kcr(args, statement_jsonl_path, model_type, model_name, max_seq_length, num_prompt_token):
+    class InputExample(object):
+
+        def __init__(self, example_id, question, contexts, endings, triples, label=None):
+            self.example_id = example_id
+            self.question = question
+            self.contexts = contexts
+            self.endings = endings
+            self.triples = triples
+            self.label = label
+
+    class InputFeatures(object):
+
+        def __init__(self, example_id, choices_features, label):
+            self.example_id = example_id
+            self.choices_features = [
+                {
+                    'input_ids': input_ids,
+                    'input_mask': input_mask,
+                    'segment_ids': segment_ids,
+                    'output_mask': output_mask,
+                    'block_flag': block_flag,
+                    'mlm_mask': mlm_mask,
+                    'mlm_label': mlm_label,
+                }
+                for _, input_ids, input_mask, segment_ids, output_mask, block_flag, mlm_mask, mlm_label in choices_features
+            ]
+            self.label = label
+
+    def read_examples(input_file):
+        with open(input_file, "r", encoding="utf-8") as f:
+            all = json.load(f)
+            examples = []
+            for json_dic in all:
+                choices = json_dic['question']['choices']
+                question_concept = json_dic['question']['question_concept']
+                label = ord(json_dic["answerKey"]) - ord("A") if 'answerKey' in json_dic else 0
+                context = json_dic["question"]["stem"]
+
+                triples = []
+                endings = []
+                contexts = []
+                for i in range(len(choices)):
+                    choice = choices[i]
+                    if choice['triple']:
+                        triple_str = ' '.join(choice['triple'][0])
+                        triples_temp = triple_str
+                    else:
+                        triples_temp = question_concept + tokenizer.sep_token + tokenizer.sep_token + choice['text']
+                    triples.append(triples_temp)
+                    endings.append(choice['text'])
+                    contexts.append(context)
+                examples.append(
+                    InputExample(
+                        example_id=json_dic["id"],
+                        contexts=contexts,
+                        question="",
+                        endings=endings,
+                        triples=triples,
+                        label=label
+                    ))
+        return examples
+
+    def convert_examples_to_features(pattern_type, examples, label_list, max_seq_length, tokenizer, prompt_token="PROMPT"):
+        ''' Loads a data file into a list of `InputBatch`s
+            `cls_token_at_end` define the location of the CLS token:
+                - False (Default, BERT/XLM pattern): [CLS] + A + [SEP] + B + [SEP]
+                - True (XLNet/GPT pattern): A + [SEP] + B + [SEP] + [CLS]
+            `cls_token_segment_id` define the segment id associated to the CLS token (0 for BERT, 2 for XLNet) '''
+        # {0:0, 1:1, 2:2, 3:3, 4:4}
+        label_map = {label: i for i, label in enumerate(label_list)}
+        features = []
+        pattern_class, pattern_idx = pattern_type.split("_")
+        for ex_index, example in enumerate(examples):
+            label = label_map[example.label]
+            choices_features = []
+            # alberta: [CLS] Question is A? [SEP] Answer is B. [SEP]
+            # for one sample
+            for ending_idx, (context, ending, triple) in enumerate(zip(example.contexts, example.endings, example.triples)):
+                # no prompt cls
+                if pattern_class == "no-prompt-cls":
+                    if pattern_idx == "0":
+                        input = tokenizer.cls_token + " " +  context + " " +  tokenizer.sep_token + " " + triple + " " +\
+                                tokenizer.sep_token
+                        input_tokens = tokenizer.tokenize(input)
+                elif pattern_class == "hard-prompt-cls":
+                    if pattern_idx == "0":
+                        # <s>question</s></s>Candidate answer is choice.</s></s>triple</s>
+                        context = context
+                        triple = triple
+                        choice = "Candidate answer is " + ending + "."
+                        input = tokenizer.cls_token + context + tokenizer.sep_token + tokenizer.sep_token + \
+                                choice + tokenizer.sep_token + tokenizer.sep_token + \
+                                triple + tokenizer.sep_token
+                        input_tokens = tokenizer.tokenize(input)
+                    elif pattern_idx == "1":
+                        # <s>question</s></s>According to: triple</s></s>Candidate answer is choice.</s>
+                        context = context
+                        triple = "According to: " + triple + "."
+                        choice = "Candidate answer is " + ending + "."
+                        input = tokenizer.cls_token + context + tokenizer.sep_token + tokenizer.sep_token + \
+                                triple + tokenizer.sep_token + tokenizer.sep_token + \
+                                choice + tokenizer.sep_token
+                        input_tokens = tokenizer.tokenize(input)
+                elif pattern_class == "hard-prompt-gen":
+                    if pattern_idx == "0":
+                        # <s>question</s></s>According to triple</s></s>Is choice the answer? [MASK], it is.
+                        context = context
+                        triple = "According to " + triple
+                        choice = "Is " + ending + " the answer?"
+                        mask = tokenizer.mask_token + ", it is."
+                        input = tokenizer.cls_token + context + tokenizer.sep_token + tokenizer.sep_token + \
+                                triple + tokenizer.sep_token + tokenizer.sep_token + choice + \
+                                " " + mask + tokenizer.sep_token
+                        input_tokens = tokenizer.tokenize(input)
+                elif pattern_class == "soft-prompt-cls":
+                    if pattern_idx == "0":
+                        # <s>question</s></s>triple</s></s>_ _ _ _ _ _Candidate answer is choice.
+                        context = context
+                        triple = triple
+                        choice = "Candidate answer is " + ending + "."
+                        soft_prompt = " ".join([prompt_token for i in range(num_prompt_token)])
+                        input = tokenizer.cls_token + context + tokenizer.sep_token + tokenizer.sep_token + \
+                                triple + tokenizer.sep_token + tokenizer.sep_token + \
+                                " " + soft_prompt + " " + choice + tokenizer.sep_token
+                        input_tokens = tokenizer.tokenize(input)
+                    elif pattern_idx == "1":
+                        # <s>question</s></s>triple</s></s>_ _ _ choice _ _ _ .
+                        context = context
+                        triple = triple
+                        choice = ending
+                        soft_prompt_1 = " ".join([prompt_token for i in range(0, int(num_prompt_token/2))])
+                        soft_prompt_2 = " ".join([prompt_token for i in range(int(num_prompt_token/2), num_prompt_token)])
+                        input = tokenizer.cls_token + context + tokenizer.sep_token + tokenizer.sep_token + \
+                                triple + tokenizer.sep_token + tokenizer.sep_token + soft_prompt_1 + " " + choice + \
+                                " " + soft_prompt_2 + tokenizer.sep_token
+                        input_tokens = tokenizer.tokenize(input)
+                    elif pattern_idx == "2":
+                        # <s>question</s></s>_ _ _ _ choice</s></s>triple</s> (initialized with hard prompt embeddings)
+                        context = context
+                        triple = triple
+                        choice = ending
+                        soft_prompt = " ".join([prompt_token for i in range(num_prompt_token)])
+                        input = tokenizer.cls_token + context + tokenizer.sep_token + tokenizer.sep_token + \
+                                soft_prompt + choice + tokenizer.sep_token + tokenizer.sep_token + \
+                                triple + tokenizer.sep_token
+                        input_tokens = tokenizer.tokenize(input)
+                elif pattern_class == "soft-prompt-gen":
+                    if pattern_idx == "0":
+                        # <s>question</s></s>triple</s></s>Is choice the answer? _ _ _ _ _ _ [MASK].
+                        context = context
+                        triple = triple
+                        choice = "Is " + ending + " the answer?"
+                        mask = tokenizer.mask_token + "."
+                        soft_prompt = " ".join([prompt_token for i in range(num_prompt_token)])
+                        input = tokenizer.cls_token + context + tokenizer.sep_token + tokenizer.sep_token + \
+                                triple + tokenizer.sep_token + tokenizer.sep_token + choice + \
+                                soft_prompt + mask + tokenizer.sep_token
+                        input_tokens = tokenizer.tokenize(input)
+                    elif pattern_idx == "1":
+                        # <s>question</s></s>triple</s></s>_ _ _ choice _ _ _ [MASK].
+                        context = context
+                        triple = triple
+                        choice = ending
+                        mask = tokenizer.mask_token + "."
+                        soft_prompt = " ".join([prompt_token for i in range(int(num_prompt_token/2))])
+                        input = tokenizer.cls_token + context + tokenizer.sep_token + tokenizer.sep_token + \
+                                triple + tokenizer.sep_token + tokenizer.sep_token + soft_prompt + " " + choice + \
+                                " " + soft_prompt + " " + mask
+                        input_tokens = tokenizer.tokenize(input)
+                    elif pattern_idx == "2":
+                        # <s>question</s></s>triple</s></s>_ choice _ _ _ [MASK], it is. (initialized with hp)
+                        context = context
+                        triple = triple
+                        choice = ending
+                        mask = tokenizer.mask_token
+                        soft_prompt_1 = " ".join([prompt_token for i in range(0,1)]) # is
+                        soft_prompt_2 = " ".join([prompt_token for i in range(1, 4)]) # the answer?
+                        soft_prompt_3 = " ".join([prompt_token for i in range(4, num_prompt_token)]) # , it is.
+                        input = tokenizer.cls_token + context + tokenizer.sep_token + tokenizer.sep_token + \
+                                triple + tokenizer.sep_token + tokenizer.sep_token + soft_prompt_1 + " " + choice + \
+                                " " + soft_prompt_2 + " " + mask + " " + soft_prompt_3 + tokenizer.sep_token
+                        input_tokens = tokenizer.tokenize(input)
+                    elif pattern_idx == "3":
+                        # <s>_ _ _ _ _ _ _</s></s>question</s></s>triple</s></s>Is choice the answer?[MASK].
+                        context = context
+                        triple = triple
+                        choice = "Is " + ending + " the answer?"
+                        mask = tokenizer.mask_token + "."
+                        soft_prompt = " ".join([prompt_token for i in range(num_prompt_token)])
+                        input = tokenizer.cls_token + soft_prompt + tokenizer.sep_token + tokenizer.sep_token + \
+                                context + tokenizer.sep_token + tokenizer.sep_token + \
+                                triple + tokenizer.sep_token + tokenizer.sep_token + \
+                                choice + mask + tokenizer.sep_token
+                        input_tokens = tokenizer.tokenize(input)
+
+                if ex_index == ending_idx == 0:
+                    print("Tokenized tokens is:")
+                    print(input_tokens)
+                    input_ids = tokenizer.convert_tokens_to_ids(input_tokens)
+                    ori = tokenizer.decode(input_ids)
+                    print("Using input pattern of %s "%(ori))
+
+
+                # convert to ids
+                input_ids = tokenizer.convert_tokens_to_ids(input_tokens)
+                # not use segment_ids, only keep format consistent.
+                segment_ids = [1] * len(input_ids)
+
+                # The mask has 1 for real tokens and 0 for padding tokens. Only real tokens are attended to.
+                input_mask = [1] * len(input_ids)
+                special_token_id = tokenizer.convert_tokens_to_ids([tokenizer.cls_token, tokenizer.sep_token])
+                output_mask = [1 if id in special_token_id else 0 for id in input_ids]  # 1 for mask
+
+                # get the mask position, the first is used for insert prompt, the second is used for prediction
+                mask_token_id = tokenizer.convert_tokens_to_ids([tokenizer.mask_token])
+                mask_token_index = [index for index, id in enumerate(input_ids) if id in mask_token_id]
+                prompt_token_id = tokenizer.convert_tokens_to_ids([prompt_token])
+                prompt_token_index = [index for index, id in enumerate(input_ids) if id in prompt_token_id]
+
+                block_flag = [0]*len(input_ids)
+                mlm_mask = [0]*len(input_ids)
+                if pattern_class == "no-prompt-cls":
+                    # special_token_id = tokenizer.convert_tokens_to_ids([tokenizer.sep_token])
+                    # sep_token_idx = []
+                    # for i, j in enumerate(input_ids):
+                    #     if j in special_token_id:
+                    #         sep_token_idx.append(i)
+                    # start = 0
+                    # for i, j in enumerate(sep_token_idx):
+                    #     if i % 2 == 0:
+                    #         for k in range(start, j+1):
+                    #             segment_ids[k] = 0
+                    #     else:
+                    #         for k in range(start, j+1):
+                    #             segment_ids[k] = 1
+                    #     start = j+1
+
+                    if pattern_idx == "0":
+                        mlm_mask[0] = 1
+                elif pattern_class == "hard-prompt-cls":
+                    if pattern_idx == "0":
+                        mlm_mask[0] = 1
+                elif pattern_class == "hard-prompt-gen":
+                    mlm_mask[mask_token_index[0]] = 1 # 1 for masked token
+                elif pattern_class == "soft-prompt-cls":
+                    for idx in prompt_token_index:
+                        block_flag[idx] = 1  # 1 for prompt placeholder
+                    mlm_mask[0] = 1
+                elif pattern_class == "soft-prompt-gen":
+                    for idx in prompt_token_index:
+                        block_flag[idx] = 1  # 1 for prompt placeholder
+                    mlm_mask[mask_token_index[0]] = 1 # 1 for masked token
+
+                # Zero-pad up to the sequence length.
+                padding_length = max_seq_length - len(input_ids)
+                input_ids = input_ids + ([tokenizer.pad_token_id] * padding_length)
+                input_mask = input_mask + ([0] * padding_length)
+                output_mask = output_mask + ([1] * padding_length)
+                segment_ids = segment_ids + ([0] * padding_length)
+                block_flag = block_flag + ([0] * padding_length)
+                mlm_mask = mlm_mask + ([0] * padding_length)
+
+
+                assert len(input_ids) == max_seq_length
+                assert len(output_mask) == max_seq_length
+                assert len(input_mask) == max_seq_length
+                assert len(segment_ids) == max_seq_length
+                assert len(block_flag) == max_seq_length
+                assert len(mlm_mask) == max_seq_length
+                mlm_label = 1 if ending_idx == label else 0
+                choices_features.append((input_tokens, input_ids, input_mask, segment_ids, output_mask, block_flag, mlm_mask, mlm_label))
+            features.append(InputFeatures(example_id=example.example_id, choices_features=choices_features, label=label))
+
+        return features
+
+    def _truncate_seq_pair(tokens_a, tokens_b, max_length):
+        """Truncates a sequence pair in place to the maximum length."""
+
+        # This is a simple heuristic which will always truncate the longer sequence
+        # one token at a time. This makes more sense than truncating an equal percent
+        # of tokens from each, since if one sequence is very short then each token
+        # that's truncated likely contains more information than a longer sequence.
+        while True:
+            total_length = len(tokens_a) + len(tokens_b)
+            if total_length <= max_length:
+                break
+            if len(tokens_a) > len(tokens_b):
+                tokens_a.pop()
+            else:
+                tokens_b.pop()
+
+    def select_field(features, field):
+        return [[choice[field] for choice in feature.choices_features] for feature in features]
+
+    def convert_features_to_tensors(features):
+        # (bs, 5, max_len)
+        all_input_ids = torch.tensor(select_field(features, 'input_ids'), dtype=torch.long)
+        all_input_mask = torch.tensor(select_field(features, 'input_mask'), dtype=torch.long)
+        all_segment_ids = torch.tensor(select_field(features, 'segment_ids'), dtype=torch.long)
+        all_output_mask = torch.tensor(select_field(features, 'output_mask'), dtype=torch.uint8)
+        all_block_flag = torch.tensor(select_field(features, 'block_flag'), dtype=torch.long)
+        all_mlm_mask = torch.tensor(select_field(features, 'mlm_mask'), dtype=torch.long)
+        # (bs, 5)
+        all_mlm_label = torch.tensor(select_field(features, 'mlm_label'), dtype=torch.long)
+        # (bs)
+        all_label = torch.tensor([f.label for f in features], dtype=torch.long)
+        return all_input_ids, all_input_mask, all_segment_ids, all_output_mask, all_label, (all_block_flag, all_mlm_mask, all_mlm_label)
+
+    path = '/mnt/nlp_model/albert-xxlarge-v2/'
+    tokenizer = AlbertTokenizer.from_pretrained(path)
+    prompt_token = '[PROMPT]'
+    tokenizer.add_tokens([prompt_token])
+    examples = read_examples(statement_jsonl_path)
+    features = convert_examples_to_features(args.pattern_format, examples, list(range(len(examples[0].endings))), max_seq_length, tokenizer, prompt_token=prompt_token)
+    example_ids = [f.example_id for f in features]
+    *data_tensors, all_label, prompt_data_tensors = convert_features_to_tensors(features)
+    assert len(prompt_data_tensors) == 3, "Prompt data tensor error"
+    return (example_ids, all_label, *data_tensors, prompt_data_tensors)
+
+def load_roberta_input_tensors_for_kcr_with_concate_choice(args, statement_jsonl_path, model_type, model_name, max_seq_length, num_prompt_token):
+    class InputExample(object):
+
+        def __init__(self, example_id, question, contexts, endings, triples, label=None):
+            self.example_id = example_id
+            self.question = question
+            self.contexts = contexts
+            self.endings = endings
+            self.triples = triples
+            self.label = label
+
+    class InputFeatures(object):
+
+        def __init__(self, example_id, choices_features, label):
+            self.example_id = example_id
+            self.choices_features = [
+                {
+                    'input_ids': input_ids,
+                    'input_mask': input_mask,
+                    'segment_ids': segment_ids,
+                    'output_mask': output_mask,
+                    'block_flag': block_flag,
+                    'mlm_mask': mlm_mask,
+                    'mlm_label': mlm_label,
+                }
+                for _, input_ids, input_mask, segment_ids, output_mask, block_flag, mlm_mask, mlm_label in choices_features
+            ]
+            self.label = label
+
+    def read_examples(input_file):
+        with open(input_file, "r", encoding="utf-8") as f:
+            all = json.load(f)
+            examples = []
+            for json_dic in all:
+                choices = json_dic['question']['choices']
+                question_concept = json_dic['question']['question_concept']
+                label = ord(json_dic["answerKey"]) - ord("A") if 'answerKey' in json_dic else 0
+                context = json_dic["question"]["stem"]
+
+                triples = []
+                endings = []
+                contexts = []
+                for i in range(len(choices)):
+                    choice = choices[i]
+                    if choice['triple']:
+                        triple_str = ' '.join(choice['triple'][0])
+                        triples_temp = triple_str
+                    else:
+                        # triples_temp = question_concept + tokenizer.sep_token + tokenizer.sep_token + choice['text']
+                        triples_temp = question_concept + " " + choice['text']
+
+                    triples.append(triples_temp)
+                    endings.append(choice['text'])
+                    contexts.append(context)
+                examples.append(
+                    InputExample(
+                        example_id=json_dic["id"],
+                        contexts=contexts,
+                        question="",
+                        endings=endings,
+                        triples=triples,
+                        label=label
+                    ))
+        return examples
+
+    def convert_examples_to_features_with_concat_choices(pattern_type, examples, label_list, max_seq_length, tokenizer, prompt_token="PROMPT"):
+        ''' Loads a data file into a list of `InputBatch`s
+            `cls_token_at_end` define the location of the CLS token:
+                - False (Default, BERT/XLM pattern): [CLS] + A + [SEP] + B + [SEP]
+                - True (XLNet/GPT pattern): A + [SEP] + B + [SEP] + [CLS]
+            `cls_token_segment_id` define the segment id associated to the CLS token (0 for BERT, 2 for XLNet) '''
+        # {0:0, 1:1, 2:2, 3:3, 4:4}
+        label_map = {label: i for i, label in enumerate(label_list)}
+        features = []
+        pattern_class, pattern_idx = pattern_type.split("_")
+        for ex_index, example in enumerate(examples):
+            label = label_map[example.label]
+            choices_features = []
+            if pattern_class == "no-prompt-cls":
+                if pattern_idx == "0":
+                    # <s>question</s></s>c1 t1</s></s>c2 t2</s></s>c3 t3</s>
+                    input = tokenizer.cls_token
+                    sep_token = tokenizer.sep_token
+                    for ending_idx, (context, ending, triple) in enumerate(
+                        zip(example.contexts, example.endings, example.triples)):
+                        choice_feature = ending + ": " + triple
+                        if ending_idx == 0:
+                            input = input + context + sep_token + sep_token + choice_feature
+                        else:
+                            input = input + sep_token + sep_token + choice_feature
+                    input = input + sep_token
+                    input_tokens = tokenizer.tokenize(input)
+                elif pattern_idx == "1":
+                    # <s>question</s></s>t1</s></s>t2</s></s>t3</s>
+                    input = tokenizer.cls_token
+                    sep_token = tokenizer.sep_token
+                    for ending_idx, (context, ending, triple) in enumerate(
+                        zip(example.contexts, example.endings, example.triples)):
+                        choice_feature = triple
+                        if ending_idx == 0:
+                            input = input + context + sep_token + sep_token + choice_feature
+                        else:
+                            input = input + sep_token + sep_token + choice_feature
+                    input = input + sep_token
+                    input_tokens = tokenizer.tokenize(input)
+            elif pattern_class == "hard-prompt-cls":
+                if pattern_idx == "0":
+                    # <s>question</s></s>Candidate answer: choice. Answer information: triple</s></s>
+                    input = tokenizer.cls_token
+                    sep_token = tokenizer.sep_token
+                    for ending_idx, (context, ending, triple) in enumerate(
+                            zip(example.contexts, example.endings, example.triples)):
+                        choice_feature = "Candidate answer: " + ending + "." + " Answer information: " + triple + "."
+                        if ending_idx == 0:
+                            input = input + context + sep_token + sep_token + choice_feature
+                        else:
+                            input = input + sep_token + sep_token + choice_feature
+                    input = input + sep_token
+                    input_tokens = tokenizer.tokenize(input)
+            elif pattern_class == "hard-prompt-gen":
+                cdx_list = ["A","B","C","D","E"]
+                if pattern_idx == "0":
+                    # <s>question</s></s>A:c1 t1</s></s>B:c2 t2</s></s>C:c3 t3</s></s>The answer is [mask].</s>
+                    input = tokenizer.cls_token
+                    sep_token = tokenizer.sep_token
+                    for ending_idx, (context, ending, triple, cdx) in enumerate(
+                        zip(example.contexts, example.endings, example.triples, cdx_list)):
+                        choice_feature = cdx + ": " + ending + ". " + triple
+                        if ending_idx == 0:
+                            input = input + context + sep_token + sep_token + choice_feature
+                        else:
+                            input = input + sep_token + sep_token + choice_feature
+                    input = input + sep_token + sep_token + "The answer is " + tokenizer.mask_token + "." + sep_token
+                    input_tokens = tokenizer.tokenize(input)
+
+            if ex_index == 0:
+                print("Tokenized tokens is:")
+                print(input_tokens)
+                input_ids = tokenizer.convert_tokens_to_ids(input_tokens)
+                ori = tokenizer.decode(input_ids)
+                print("Using input pattern of %s " % (ori))
+
+            # convert to ids
+            input_ids = tokenizer.convert_tokens_to_ids(input_tokens)
+            # not use segment_ids, only keep format consistent.
+            segment_ids = [0] * len(input_ids)
+
+            # The mask has 1 for real tokens and 0 for padding tokens. Only real tokens are attended to.
+            input_mask = [1] * len(input_ids)
+            special_token_id = tokenizer.convert_tokens_to_ids([tokenizer.cls_token, tokenizer.sep_token])
+            output_mask = [1 if id in special_token_id else 0 for id in input_ids]  # 1 for mask
+
+            # get the mask position, the first is used for insert prompt, the second is used for prediction
+            mask_token_id = tokenizer.convert_tokens_to_ids([tokenizer.mask_token])
+            mask_token_index = [index for index, id in enumerate(input_ids) if id in mask_token_id]
+            prompt_token_id = tokenizer.convert_tokens_to_ids([prompt_token])
+            prompt_token_index = [index for index, id in enumerate(input_ids) if id in prompt_token_id]
+
+            block_flag = [0] * len(input_ids)
+            mlm_mask = [0] * len(input_ids)
+            if pattern_class == "no-prompt-cls":
+                if pattern_idx == "0":
+                    sep_token_id = tokenizer.convert_tokens_to_ids([tokenizer.cls_token, tokenizer.sep_token])
+                    sep_token_idx = []
+                    for i, j in enumerate(input_ids):
+                        if j in sep_token_id:
+                            sep_token_idx.append(i)
+                    sep_token_idx = sep_token_idx[1:-1]
+                    if len(sep_token_idx) != 10:
+                        print("The number of sep token is %d!"%(len(sep_token_idx)))
+                        print("Tokenized tokens is:")
+                        print(input_tokens)
+                        input_ids = tokenizer.convert_tokens_to_ids(input_tokens)
+                        ori = tokenizer.decode(input_ids)
+                        print("Using input pattern of %s " % (ori))
+                    # each second </s> of </s></s> is chosen to represent the choice feature.
+                    for i in range(1, len(sep_token_idx), 2):
+                        mlm_mask[sep_token_idx[i]] = 1
+                    if sum(mlm_mask) != 5:
+                        print("The number of sep token in mlm_mask is %d!" % (sum(mlm_mask)))
+                elif pattern_idx == "1":
+                    sep_token_id = tokenizer.convert_tokens_to_ids([tokenizer.cls_token, tokenizer.sep_token])
+                    sep_token_idx = []
+                    for i, j in enumerate(input_ids):
+                        if j in sep_token_id:
+                            sep_token_idx.append(i)
+                    sep_token_idx = sep_token_idx[1:-1]
+                    if len(sep_token_idx) != 10:
+                        print("The number of sep token is %d!"%(len(sep_token_idx)))
+                        print("Tokenized tokens is:")
+                        print(input_tokens)
+                        input_ids = tokenizer.convert_tokens_to_ids(input_tokens)
+                        ori = tokenizer.decode(input_ids)
+                        print("Using input pattern of %s " % (ori))
+                    # each second </s> of </s></s> is chosen to represent the choice feature.
+                    for i in range(1, len(sep_token_idx), 2):
+                        mlm_mask[sep_token_idx[i]] = 1
+                    if sum(mlm_mask) != 5:
+                        print("The number of sep token in mlm_mask is %d!" % (sum(mlm_mask)))
+            elif pattern_class == "hard-prompt-gen":
+                if pattern_idx == "0":
+                    mlm_mask[mask_token_index[0]] = 1
+            elif pattern_class == "hard-prompt-cls":
+                if pattern_idx == "0":
+                    sep_token_id = tokenizer.convert_tokens_to_ids([tokenizer.sep_token])
+                    sep_token_idx = []
+                    for i, j in enumerate(input_ids):
+                        if j in sep_token_id:
+                            sep_token_idx.append(i)
+                    sep_token_idx = sep_token_idx[:-1]
+                    if len(sep_token_idx) != 10:
+                        print("The number of sep token is %d!" % (len(sep_token_idx)))
+                        print("Tokenized tokens is:")
+                        print(input_tokens)
+                        input_ids = tokenizer.convert_tokens_to_ids(input_tokens)
+                        ori = tokenizer.decode(input_ids)
+                        print("Using input pattern of %s " % (ori))
+                    # each second </s> of </s></s> is chosen to represent the choice feature.
+                    for i in range(1, len(sep_token_idx), 2):
+                        mlm_mask[sep_token_idx[i]] = 1
+                    if sum(mlm_mask) != 5:
+                        print("The number of sep token in mlm_mask is %d!" % (sum(mlm_mask)))
+
+            # Zero-pad up to the sequence length.
+            padding_length = max_seq_length - len(input_ids)
+            input_ids = input_ids + ([tokenizer.pad_token_id] * padding_length)
+            input_mask = input_mask + ([0] * padding_length)
+            output_mask = output_mask + ([1] * padding_length)
+            segment_ids = segment_ids + ([0] * padding_length)
+            block_flag = block_flag + ([0] * padding_length)
+            mlm_mask = mlm_mask + ([0] * padding_length)
+
+            assert len(input_ids) == max_seq_length
+            assert len(output_mask) == max_seq_length
+            assert len(input_mask) == max_seq_length
+            assert len(segment_ids) == max_seq_length
+            assert len(block_flag) == max_seq_length
+            assert len(mlm_mask) == max_seq_length
+            mlm_label = label
+            choices_features.append((input_tokens, input_ids, input_mask, segment_ids, output_mask, block_flag,
+                                     mlm_mask, mlm_label))
+
+            features.append(InputFeatures(example_id=example.example_id, choices_features=choices_features, label=label))
+
+        return features
+
+    def _truncate_seq_pair(tokens_a, tokens_b, max_length):
+        """Truncates a sequence pair in place to the maximum length."""
+
+        # This is a simple heuristic which will always truncate the longer sequence
+        # one token at a time. This makes more sense than truncating an equal percent
+        # of tokens from each, since if one sequence is very short then each token
+        # that's truncated likely contains more information than a longer sequence.
+        while True:
+            total_length = len(tokens_a) + len(tokens_b)
+            if total_length <= max_length:
+                break
+            if len(tokens_a) > len(tokens_b):
+                tokens_a.pop()
+            else:
+                tokens_b.pop()
+
+    def select_field(features, field):
+        return [[choice[field] for choice in feature.choices_features] for feature in features]
+
+    def convert_features_to_tensors(features):
+        # (bs, 5, max_len)
+        all_input_ids = torch.tensor(select_field(features, 'input_ids'), dtype=torch.long)
+        all_input_mask = torch.tensor(select_field(features, 'input_mask'), dtype=torch.long)
+        all_segment_ids = torch.tensor(select_field(features, 'segment_ids'), dtype=torch.long)
+        all_output_mask = torch.tensor(select_field(features, 'output_mask'), dtype=torch.uint8)
+        all_block_flag = torch.tensor(select_field(features, 'block_flag'), dtype=torch.long)
+        all_mlm_mask = torch.tensor(select_field(features, 'mlm_mask'), dtype=torch.long)
+        # (bs, 5)
+        all_mlm_label = torch.tensor(select_field(features, 'mlm_label'), dtype=torch.long)
+        # (bs)
+        all_label = torch.tensor([f.label for f in features], dtype=torch.long)
+        return all_input_ids, all_input_mask, all_segment_ids, all_output_mask, all_label, (all_block_flag, all_mlm_mask, all_mlm_label)
+
+    path = '/mnt/nlp_model/huggingface/roberta-large/'
+    tokenizer = RobertaTokenizer.from_pretrained(path)
+    prompt_token = '[PROMPT]'
+    tokenizer.add_tokens([prompt_token])
+    examples = read_examples(statement_jsonl_path)
+    features = convert_examples_to_features_with_concat_choices(args.pattern_format, examples, list(range(len(examples[0].endings))), max_seq_length, tokenizer, prompt_token=prompt_token)
+    example_ids = [f.example_id for f in features]
+    *data_tensors, all_label, prompt_data_tensors = convert_features_to_tensors(features)
+    assert len(prompt_data_tensors) == 3, "Prompt data tensor error"
+    return (example_ids, all_label, *data_tensors, prompt_data_tensors)
+
+def load_albert_input_tensors_for_kcr_with_concate_choice(args, statement_jsonl_path, model_type, model_name, max_seq_length, num_prompt_token):
+    class InputExample(object):
+
+        def __init__(self, example_id, question, contexts, endings, triples, label=None):
+            self.example_id = example_id
+            self.question = question
+            self.contexts = contexts
+            self.endings = endings
+            self.triples = triples
+            self.label = label
+
+    class InputFeatures(object):
+
+        def __init__(self, example_id, choices_features, label):
+            self.example_id = example_id
+            self.choices_features = [
+                {
+                    'input_ids': input_ids,
+                    'input_mask': input_mask,
+                    'segment_ids': segment_ids,
+                    'output_mask': output_mask,
+                    'block_flag': block_flag,
+                    'mlm_mask': mlm_mask,
+                    'mlm_label': mlm_label,
+                }
+                for _, input_ids, input_mask, segment_ids, output_mask, block_flag, mlm_mask, mlm_label in choices_features
+            ]
+            self.label = label
+
+    def read_examples(input_file):
+        with open(input_file, "r", encoding="utf-8") as f:
+            all = json.load(f)
+            examples = []
+            for json_dic in all:
+                choices = json_dic['question']['choices']
+                question_concept = json_dic['question']['question_concept']
+                label = ord(json_dic["answerKey"]) - ord("A") if 'answerKey' in json_dic else 0
+                context = json_dic["question"]["stem"]
+
+                triples = []
+                endings = []
+                contexts = []
+                for i in range(len(choices)):
+                    choice = choices[i]
+                    if choice['triple']:
+                        triple_str = ' '.join(choice['triple'][0])
+                        triples_temp = triple_str
+                    else:
+                        # triples_temp = question_concept + tokenizer.sep_token + tokenizer.sep_token + choice['text']
+                        triples_temp = question_concept + " " + choice['text']
+
+                    triples.append(triples_temp)
+                    endings.append(choice['text'])
+                    contexts.append(context)
+                examples.append(
+                    InputExample(
+                        example_id=json_dic["id"],
+                        contexts=contexts,
+                        question="",
+                        endings=endings,
+                        triples=triples,
+                        label=label
+                    ))
+        return examples
+
+    def convert_examples_to_features_with_concat_choices(pattern_type, examples, label_list, max_seq_length, tokenizer, prompt_token="PROMPT"):
+        ''' Loads a data file into a list of `InputBatch`s
+            `cls_token_at_end` define the location of the CLS token:
+                - False (Default, BERT/XLM pattern): [CLS] + A + [SEP] + B + [SEP]
+                - True (XLNet/GPT pattern): A + [SEP] + B + [SEP] + [CLS]
+            `cls_token_segment_id` define the segment id associated to the CLS token (0 for BERT, 2 for XLNet) '''
+        # {0:0, 1:1, 2:2, 3:3, 4:4}
+        label_map = {label: i for i, label in enumerate(label_list)}
+        features = []
+        pattern_class, pattern_idx = pattern_type.split("_")
+        for ex_index, example in enumerate(examples):
+            label = label_map[example.label]
+            choices_features = []
+            if pattern_class == "no-prompt-cls":
+                if pattern_idx == "0":
+                    # [cls] question [SEP] c1 t1 [SEP] c2 t2 [SEP] c3 t3 [SEP]
+                    # 0 0 0 1 1 1 0 0 0 1 1 1
+                    input = tokenizer.cls_token
+                    sep_token = tokenizer.sep_token
+                    for ending_idx, (context, ending, triple) in enumerate(
+                        zip(example.contexts, example.endings, example.triples)):
+                        choice_feature = ending + ". " + triple
+                        if ending_idx == 0:
+                            input = input + " " + context + " " + sep_token + " " + choice_feature
+                        else:
+                            input = input + " " + sep_token + " " + choice_feature
+                    input = input + " " + sep_token
+                    input_tokens = tokenizer.tokenize(input)
+            elif pattern_class == "hard-prompt-gen":
+                cdx_list = ["A","B","C","D","E"]
+                if pattern_idx == "0":
+                    # <s>question</s></s>A:c1 t1</s></s>B:c2 t2</s></s>C:c3 t3</s></s>The answer is [mask].</s>
+                    input = tokenizer.cls_token
+                    sep_token = tokenizer.sep_token
+                    for ending_idx, (context, ending, triple, cdx) in enumerate(
+                        zip(example.contexts, example.endings, example.triples, cdx_list)):
+                        choice_feature = cdx + ": " + ending + ". " + triple
+                        if ending_idx == 0:
+                            input = input + context + sep_token + sep_token + choice_feature
+                        else:
+                            input = input + sep_token + sep_token + choice_feature
+                    input = input + sep_token + sep_token + "The answer is " + tokenizer.mask_token + "." + sep_token
+                    input_tokens = tokenizer.tokenize(input)
+
+            if ex_index == 0:
+                print("Tokenized tokens is:")
+                print(input_tokens)
+                input_ids = tokenizer.convert_tokens_to_ids(input_tokens)
+                ori = tokenizer.decode(input_ids)
+                print("Using input pattern of %s " % (ori))
+
+            # convert to ids
+            input_ids = tokenizer.convert_tokens_to_ids(input_tokens)
+            # not use segment_ids, only keep format consistent.
+            segment_ids = [1] * len(input_ids)
+
+            # The mask has 1 for real tokens and 0 for padding tokens. Only real tokens are attended to.
+            input_mask = [1] * len(input_ids)
+            special_token_id = tokenizer.convert_tokens_to_ids([tokenizer.cls_token, tokenizer.sep_token])
+            output_mask = [1 if id in special_token_id else 0 for id in input_ids]  # 1 for mask
+
+            # get the mask position, the first is used for insert prompt, the second is used for prediction
+            mask_token_id = tokenizer.convert_tokens_to_ids([tokenizer.mask_token])
+            mask_token_index = [index for index, id in enumerate(input_ids) if id in mask_token_id]
+            prompt_token_id = tokenizer.convert_tokens_to_ids([prompt_token])
+            prompt_token_index = [index for index, id in enumerate(input_ids) if id in prompt_token_id]
+
+            block_flag = [0] * len(input_ids)
+            mlm_mask = [0] * len(input_ids)
+            if pattern_class == "no-prompt-cls":
+                if pattern_idx == "0":
+                    special_token_id = tokenizer.convert_tokens_to_ids([tokenizer.sep_token])
+                    sep_token_idx = []
+                    for i, j in enumerate(input_ids):
+                        if j in special_token_id:
+                            sep_token_idx.append(i)
+
+                    # start = 0
+                    # for i, j in enumerate(sep_token_idx):
+                    #     if i%2 == 0:
+                    #         for k in range(start,j):
+                    #             segment_ids[k] = 0
+                    #     else:
+                    #         for k in range(start, j):
+                    #             segment_ids[k] = 1
+                    #     start = j
+
+                    sep_token_idx = sep_token_idx[:-1]
+                    if len(sep_token_idx) != 5:
+                        print("The number of sep token is %d!"%(len(sep_token_idx)))
+                        print("Tokenized tokens is:")
+                        print(input_tokens)
+                        input_ids = tokenizer.convert_tokens_to_ids(input_tokens)
+                        ori = tokenizer.decode(input_ids)
+                        print("Using input pattern of %s " % (ori))
+                    # each second </s> of </s></s> is chosen to represent the choice feature.
+                    for i in sep_token_idx:
+                        mlm_mask[i] = 1
+                    if sum(mlm_mask) != 5:
+                        print("The number of sep token in mlm_mask is %d!" % (sum(mlm_mask)))
+            elif pattern_class == "hard-prompt-gen":
+                if pattern_idx == "0":
+                    mlm_mask[mask_token_index[0]] = 1
+
+            # Zero-pad up to the sequence length.
+            padding_length = max_seq_length - len(input_ids)
+            input_ids = input_ids + ([tokenizer.pad_token_id] * padding_length)
+            input_mask = input_mask + ([0] * padding_length)
+            output_mask = output_mask + ([1] * padding_length)
+            segment_ids = segment_ids + ([0] * padding_length)
+            block_flag = block_flag + ([0] * padding_length)
+            mlm_mask = mlm_mask + ([0] * padding_length)
+
+            assert len(input_ids) == max_seq_length
+            assert len(output_mask) == max_seq_length
+            assert len(input_mask) == max_seq_length
+            assert len(segment_ids) == max_seq_length
+            assert len(block_flag) == max_seq_length
+            assert len(mlm_mask) == max_seq_length
+            mlm_label = label
+            choices_features.append((input_tokens, input_ids, input_mask, segment_ids, output_mask, block_flag,
+                                     mlm_mask, mlm_label))
+
+            features.append(InputFeatures(example_id=example.example_id, choices_features=choices_features, label=label))
+
+        return features
+
+    def _truncate_seq_pair(tokens_a, tokens_b, max_length):
+        """Truncates a sequence pair in place to the maximum length."""
+
+        # This is a simple heuristic which will always truncate the longer sequence
+        # one token at a time. This makes more sense than truncating an equal percent
+        # of tokens from each, since if one sequence is very short then each token
+        # that's truncated likely contains more information than a longer sequence.
+        while True:
+            total_length = len(tokens_a) + len(tokens_b)
+            if total_length <= max_length:
+                break
+            if len(tokens_a) > len(tokens_b):
+                tokens_a.pop()
+            else:
+                tokens_b.pop()
+
+    def select_field(features, field):
+        return [[choice[field] for choice in feature.choices_features] for feature in features]
+
+    def convert_features_to_tensors(features):
+        # (bs, 5, max_len)
+        all_input_ids = torch.tensor(select_field(features, 'input_ids'), dtype=torch.long)
+        all_input_mask = torch.tensor(select_field(features, 'input_mask'), dtype=torch.long)
+        all_segment_ids = torch.tensor(select_field(features, 'segment_ids'), dtype=torch.long)
+        all_output_mask = torch.tensor(select_field(features, 'output_mask'), dtype=torch.uint8)
+        all_block_flag = torch.tensor(select_field(features, 'block_flag'), dtype=torch.long)
+        all_mlm_mask = torch.tensor(select_field(features, 'mlm_mask'), dtype=torch.long)
+        # (bs, 5)
+        all_mlm_label = torch.tensor(select_field(features, 'mlm_label'), dtype=torch.long)
+        # (bs)
+        all_label = torch.tensor([f.label for f in features], dtype=torch.long)
+        return all_input_ids, all_input_mask, all_segment_ids, all_output_mask, all_label, (all_block_flag, all_mlm_mask, all_mlm_label)
+
+    path = '/mnt/nlp_model/albert-xxlarge-v2/'
+    tokenizer = AlbertTokenizer.from_pretrained(path)
+    prompt_token = '[PROMPT]'
+    tokenizer.add_tokens([prompt_token])
+    examples = read_examples(statement_jsonl_path)
+    features = convert_examples_to_features_with_concat_choices(args.pattern_format, examples, list(range(len(examples[0].endings))), max_seq_length, tokenizer, prompt_token=prompt_token)
+    example_ids = [f.example_id for f in features]
+    *data_tensors, all_label, prompt_data_tensors = convert_features_to_tensors(features)
+    assert len(prompt_data_tensors) == 3, "Prompt data tensor error"
+    return (example_ids, all_label, *data_tensors, prompt_data_tensors)
 
 def load_lstm_input_tensors(input_jsonl_path, max_seq_length):
     def _truncate_seq_pair(tokens_a, tokens_b, max_length):
@@ -1164,14 +2669,27 @@ def load_lstm_input_tensors(input_jsonl_path, max_seq_length):
     input_lengths = torch.tensor(input_lengths, dtype=torch.long)
     return qids, labels, input_ids, input_lengths
 
-
 def load_input_tensors(args, input_jsonl_path, model_type, model_name, max_seq_length):
     if model_type in ('lstm',):
         return load_lstm_input_tensors(input_jsonl_path, max_seq_length)
     elif model_type in ('gpt',):
         return load_gpt_input_tensors(model_name, args.pattern_type, input_jsonl_path, max_seq_length, args.prompt_token_num)
+    elif model_type in ('roberta'):
+        return load_roberta_input_tensors(args, input_jsonl_path, model_type, model_name, max_seq_length, args.prompt_token_num)
     elif model_type in ('bert', 'xlnet', 'roberta', 'albert'):
         return load_bert_xlnet_roberta_input_tensors(args, input_jsonl_path, model_type, model_name, max_seq_length)
+
+def load_input_tensors_for_kcr(args, input_jsonl_path, model_type, model_name, max_seq_length):
+    if model_type in ('roberta'):
+        if args.concat_choices:
+            return load_roberta_input_tensors_for_kcr_with_concate_choice(args, input_jsonl_path, model_type, model_name, max_seq_length, args.prompt_token_num)
+        else:
+            return load_roberta_input_tensors_for_kcr(args, input_jsonl_path, model_type, model_name, max_seq_length, args.prompt_token_num)
+    elif model_type in ("albert"):
+        if args.concat_choices:
+            return load_albert_input_tensors_for_kcr_with_concate_choice(args, input_jsonl_path, model_type, model_name, max_seq_length, args.prompt_token_num)
+        else:
+            return load_albert_input_tensors_for_kcr(args, input_jsonl_path, model_type, model_name, max_seq_length, args.prompt_token_num)
 
 
 def load_info(statement_path: str):
