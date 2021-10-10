@@ -1,6 +1,6 @@
 import random
 
-import numpy
+import numpy as np
 import torch
 import copy
 from transformers import *
@@ -83,6 +83,79 @@ def evaluate_accuracy_prompt_with_generate(eval_set, model, type=None):
             n_correct += (logits.argmax(1) == labels).sum().item()
             n_samples += labels.size(0)
     return n_correct / n_samples
+
+def evaluate_accuracy_prompt_with_classify_head_for_cat_two_cho(eval_set, model, type=None):
+    n_samples, n_correct = 0, 0
+    model.eval()
+    with torch.no_grad():
+        for sample_ids, qids, labels, *input_data,  prompt_data in eval_set:
+            # (bs*10, 2)
+            logits, _ = model(*input_data, prompt_data=prompt_data, sample_ids=sample_ids, type=type)
+            logits = logits.view(-1,10,2) # (bs, 10, 2)
+            logits_abs = torch.abs(logits[:, :, 0] - logits[:, :, 1])
+            logits = logits.argmax(dim=-1) # (bs, 10)
+            num_sap = logits.shape[0]
+            pred = []
+            labels = labels.cpu().numpy().tolist()
+            for sid in range(num_sap):
+                logit = logits[sid]
+                logit_abs = logits_abs[sid]
+                logit_abs = logit_abs.cpu().numpy().tolist()
+                win_count = [0] * 5  # [0, 0, 0, 0, 0]
+                idx = 0
+                winer_dict = {}
+                diff_dict = {}
+                for i in range(5):
+                    for j in range(5):
+                        if j > i:
+                            key = str(i) + "_" + str(j)
+                            if logit[idx] == 0:
+                                win_count[i] += 1
+                                winer_dict[key] = i
+                            else:
+                                win_count[j] += 1
+                                winer_dict[key] = j
+                            diff_dict[key] = logit_abs[idx]
+                            idx += 1
+                win_count = np.array(win_count)
+                max = np.max(win_count)
+                flag = (win_count == max)
+                win = []
+                for idx, f in enumerate(flag):
+                    if f:
+                        win.append(idx)
+                if len(win) == 1:
+                    pred.append(win[0])
+                elif len(win) == 2:
+                    key = str(win[0]) + "_" + str(win[1])
+                    pred.append(winer_dict[key])
+                elif len(win) == 3:
+                    key1 = str(win[0]) + "_" + str(win[1])
+                    key2 = str(win[1]) + "_" + str(win[2])
+                    key3 = str(win[0]) + "_" + str(win[2])
+                    s1, w1 = diff_dict[key1], winer_dict[key1]
+                    s2, w2 = diff_dict[key2], winer_dict[key2]
+                    s3, w3 = diff_dict[key3], winer_dict[key3]
+                    score = np.array([s1, s2, s3])
+                    max_s = np.max(score)
+                    flag_s = (score == max_s)
+                    win_s = []
+                    for idx, f in enumerate(flag_s):
+                        if f:
+                            win_s.append(idx)
+                    assert len(win_s) == 1, "Vote error!"
+                    if win_s[0] == 0:
+                        pred.append(w1)
+                    elif win_s[0] == 1:
+                        pred.append(w2)
+                    else:
+                        pred.append(w3)
+            for p, l in zip(pred, labels):
+                if p == l:
+                    n_correct += 1
+            n_samples += len(labels)
+    return n_correct / n_samples
+
 
 def pred_to_file(eval_set, model, output_path):
     model.eval()
@@ -288,6 +361,11 @@ def train(args):
                                               from_checkpoint=args.from_checkpoint,
                                               prompt_token_num=args.prompt_token_num,
                                               init_range=args.init_range)
+            elif args.concat_two_choices:
+                model = PromptWithKCRWithConcatTwoChoicesClassify(args=args, model_name=args.encoder, label_list_len=2,
+                                                               from_checkpoint=args.from_checkpoint,
+                                                               prompt_token_num=args.prompt_token_num,
+                                                               init_range=args.init_range)
             else:
                 model = PromptWithKCRClassify(args=args, model_name=args.encoder, label_list_len=2,
                                                 from_checkpoint=args.from_checkpoint,
@@ -386,6 +464,11 @@ def train(args):
     # try:
     rel_grad = []
     linear_grad = []
+    if args.input_format in ['soft_prompt_p_tuning_classify']:
+        if args.concat_two_choices:
+            dev_acc = evaluate_accuracy_prompt_with_classify_head_for_cat_two_cho(dataset.dev(), model, type='dev')
+            test_acc = 0.0
+        print('| Before training | dev_acc {:7.4f} | test_acc {:7.4f} |'.format(dev_acc, test_acc))
     for epoch_id in range(args.n_epochs):
         # if epoch_id == args.unfreeze_epoch:
         #     print('encoder unfreezed')
@@ -427,7 +510,10 @@ def train(args):
                         loss = torch.mul(loss, label_mask)
                         loss = torch.sum(loss) / torch.sum(label_mask)
                     elif args.input_format in ['path-generate', 'soft_prompt_p_tuning_classify']:
-                        loss = loss_func(logits, labels[a:b])
+                        if args.concat_two_choices:
+                            loss = loss_func(logits, mlm_labels)
+                        else:
+                            loss = loss_func(logits, labels[a:b])
 
                 loss = loss * (b - a) / bs
                 loss.backward()
@@ -467,8 +553,12 @@ def train(args):
                 dev_acc = evaluate_accuracy_prompt(dataset.dev(), model, type='dev')
                 test_acc = evaluate_accuracy_prompt(dataset.test(), model, type='test') if dataset.test_size() > 0 else 0.0
         elif args.input_format in ['soft_prompt_p_tuning_classify']:
-            dev_acc = evaluate_accuracy_prompt_with_classify_head(dataset.dev(), model, type='dev')
-            test_acc = evaluate_accuracy_prompt_with_classify_head(dataset.test(), model,
+            if args.concat_two_choices:
+                dev_acc = evaluate_accuracy_prompt_with_classify_head_for_cat_two_cho(dataset.dev(), model, type='dev')
+                test_acc = 0.0
+            else:
+                dev_acc = evaluate_accuracy_prompt_with_classify_head(dataset.dev(), model, type='dev')
+                test_acc = evaluate_accuracy_prompt_with_classify_head(dataset.test(), model,
                                                                    type='test') if dataset.test_size() > 0 else 0.0
         elif args.input_format in ['p-tuning-GPT-generate']:
             dev_acc = evaluate_accuracy_prompt_with_generate(dataset.dev(), model, type='dev')
@@ -505,8 +595,134 @@ def train(args):
 
 
 def eval(args):
-    raise NotImplementedError()
+    train_pred_path = os.path.join(args.save_dir, 'predictions_train')
+    dev_pred_path = os.path.join(args.save_dir, 'predictions_dev')
+    test_pred_path = os.path.join(args.save_dir, 'predictions_test')
+    model_path = os.path.join(args.save_dir, 'model.pt')
+    device = torch.device('cuda:{}'.format(args.gpu_device) if torch.cuda.is_available() and args.cuda else "cpu")
+    model, old_args = torch.load(model_path, map_location=device)
+    model.to(device)
+    model.eval()
 
+    path_embedding_path = None
+    use_contextualized = False
+    # initialize dataloader
+    dataset = None
+    if args.experiment_base == "p-tuning":
+        dataset = LMRelationNetDataLoader(args, path_embedding_path,
+                                          args.train_statements, args.train_rel_paths,
+                                          args.dev_statements, args.dev_rel_paths,
+                                          args.test_statements, args.test_rel_paths,
+                                          batch_size=args.batch_size, eval_batch_size=args.eval_batch_size,
+                                          device=device,
+                                          model_name=args.encoder,
+                                          max_tuple_num=args.max_tuple_num, max_seq_length=args.max_seq_len,
+                                          is_inhouse=args.inhouse, inhouse_train_qids_path=args.inhouse_train_qids,
+                                          use_contextualized=use_contextualized,
+                                          train_adj_path=args.train_adj, dev_adj_path=args.dev_adj,
+                                          test_adj_path=args.test_adj,
+                                          train_node_features_path=args.train_node_features,
+                                          dev_node_features_path=args.dev_node_features,
+                                          test_node_features_path=args.test_node_features,
+                                          node_feature_type=args.node_feature_type)
+    elif args.experiment_base == "kcr":
+        dataset = KCRDataLoader(args, args.train_statements, args.dev_statements, args.test_statements,
+                                batch_size=args.batch_size, eval_batch_size=args.eval_batch_size,
+                                device=device, model_name=args.encoder, max_seq_length=args.max_seq_len,
+                                is_inhouse=args.inhouse, inhouse_train_qids_path=args.inhouse_train_qids)
+
+    print("***** generating model predictions *****")
+    print(f'| dataset: {old_args.dataset} | save_dir: {args.save_dir} |')
+    output_path = dev_pred_path
+    data_loader = dataset.dev()
+    n_correct = 0.0
+    n_samples = 0.0
+    with torch.no_grad(), open(output_path, 'w') as fout:
+        for id, (sample_ids, qids, labels, *input_data, prompt_data) in enumerate(data_loader):
+            # (bs*10, 2)
+            logits, _ = model(*input_data, prompt_data=prompt_data, sample_ids=sample_ids, type=type)
+            logits = logits.view(-1, 10, 2)  # (bs, 10, 2)
+            logits_abs = torch.abs(logits[:, :, 0] - logits[:, :, 1])
+            logits_abs = logits_abs.cpu().numpy().tolist()
+            logits = logits.argmax(dim=-1)  # (bs, 10)
+            num_sap = logits.shape[0]
+            preds = []
+            labels = labels.cpu().numpy().tolist()
+            pred_logits = np.zeros((num_sap, 5, 5))
+            for sid in range(num_sap):
+                win_count = [0] * 5  # [0, 0, 0, 0, 0]
+                idx = 0
+                winer_dict = {}
+                diff_dict = {}
+                for i in range(5):
+                    for j in range(5):
+                        if j > i:
+                            score_diff = logits_abs[sid][idx] if logits[sid][idx] == 0 else (-1.0)*logits_abs[sid][idx]
+                            pred_logits[sid][i][j] = score_diff
+                            # idx += 1
+                            key = str(i) + "_" + str(j)
+                            if logits[sid][idx] == 0:
+                                win_count[i] += 1
+                                winer_dict[key] = i
+                            else:
+                                win_count[j] += 1
+                                winer_dict[key] = j
+                            diff_dict[key] = logits_abs[sid][idx]
+                            idx += 1
+                win_count = np.array(win_count)
+                max = np.max(win_count)
+                flag = (win_count == max)
+                win = []
+                for idx, f in enumerate(flag):
+                    if f:
+                        win.append(idx)
+                if len(win) == 1:
+                    preds.append(win[0])
+                elif len(win) == 2:
+                    key = str(win[0]) + "_" + str(win[1])
+                    preds.append(winer_dict[key])
+                elif len(win) == 3:
+                    key1 = str(win[0]) + "_" + str(win[1])
+                    key2 = str(win[1]) + "_" + str(win[2])
+                    key3 = str(win[0]) + "_" + str(win[2])
+                    s1, w1 = diff_dict[key1], winer_dict[key1]
+                    s2, w2 = diff_dict[key2], winer_dict[key2]
+                    s3, w3 = diff_dict[key3], winer_dict[key3]
+                    score = np.array([s1, s2, s3])
+                    max_s = np.max(score)
+                    flag_s = (score == max_s)
+                    win_s = []
+                    for idx, f in enumerate(flag_s):
+                        if f:
+                            win_s.append(idx)
+                    assert len(win_s) == 1, "Vote error!"
+                    if win_s[0] == 0:
+                        preds.append(w1)
+                    elif win_s[0] == 1:
+                        preds.append(w2)
+                    else:
+                        preds.append(w3)
+            for p, l in zip(preds, labels):
+                if p == l:
+                    n_correct += 1
+            n_samples += len(labels)
+
+            for idx, (qid, label, pred) in enumerate(zip(qids, labels, preds)):
+                title = "Question: " + str(qid) + " Label: " + str(label) + " Pred: " + str(pred)
+                fout.write("{}\n".format(title))
+                for i in range(5):
+                    line_logit = pred_logits[idx][i]
+                    line_logit = "\t".join(["%.3f"%l for l in line_logit])
+                    line_logit = "\t" + line_logit + "\n"
+                    fout.write(line_logit)
+                fout.write("\n")
+
+        result = n_correct / n_samples
+        result = "Accuracy:%.4f\n" % (result)
+        fout.write(result)
+
+    print(f'predictions saved to {output_path}')
+    print('***** prediction done *****')
 
 def pred(args):
 

@@ -197,6 +197,7 @@ def get_parser():
     parser.add_argument('--using_attention_for_kcr', default=0, type=int, help='whether to use attention when classification')
     parser.add_argument('--prompt_embeddings_initialized', default=0, type=int, help='whether to use hard prompt initialize')
     parser.add_argument('--concat_choices', default=0, type=int, help='whether to concat choices')
+    parser.add_argument('--concat_two_choices', default=0, type=int, help='whether to concat choices')
 
     # regularization
     parser.add_argument('--dropoutm', type=float, default=0.3, help='dropout for mlp hidden units (0 = no dropout')

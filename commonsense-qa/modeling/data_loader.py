@@ -121,10 +121,11 @@ class KCRDataLoader(object):
 
         # (num_example), (num_example, 5, max_seq_lem), (num_example, 5)
         print("Load and process input data")
-        self.train_qids, self.train_labels, *self.train_data, self.prompt_train_data = load_input_tensors_for_kcr(self.args, train_statement_path, model_type, model_name, max_seq_length)
-        self.dev_qids, self.dev_labels, *self.dev_data, self.prompt_dev_data = load_input_tensors_for_kcr(self.args, dev_statement_path, model_type, model_name, max_seq_length)
+        if self.args.mode == "train":
+            self.train_qids, self.train_labels, *self.train_data, self.prompt_train_data = load_input_tensors_for_kcr(self.args, train_statement_path, model_type, model_name, max_seq_length, "train")
+        self.dev_qids, self.dev_labels, *self.dev_data, self.prompt_dev_data = load_input_tensors_for_kcr(self.args, dev_statement_path, model_type, model_name, max_seq_length, "eval")
 
-        num_choice = self.train_data[0].size(1)
+        # num_choice = self.train_data[0].size(1)
 
         if self.is_inhouse:
             with open(inhouse_train_qids_path, 'r') as fin:

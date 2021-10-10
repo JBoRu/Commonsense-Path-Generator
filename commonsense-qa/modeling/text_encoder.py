@@ -338,12 +338,12 @@ class ClassifyMLPHeadForKCR(nn.Module):
         return logits
 
 class ClassifyMLPHeadForKCRWithConcatChoices(nn.Module):
-    def __init__(self, args, input_size, output_size, init_range):
+    def __init__(self, args, input_size, output_size, init_range, num_cat_choices):
         super(ClassifyMLPHeadForKCRWithConcatChoices, self).__init__()
         self.args = args
         self.init_range = init_range
         if self.args.using_attention_for_kcr:
-            self.att_merge = AttentionMergeWithConcatChoices(input_size, output_size, 0.1)
+            self.att_merge = AttentionMergeWithConcatChoices(args, input_size, output_size, 0.1, num_cat_choices)
         self.classify_head = nn.Sequential(nn.Dropout(0.1), nn.Linear(input_size, 1))
 
         if self.init_range > 0:
@@ -359,11 +359,11 @@ class ClassifyMLPHeadForKCRWithConcatChoices(nn.Module):
             module.weight.data.fill_(1.0)
 
     def forward(self, input, attention_mask, mlm_mask):
-        # input: [bs*1, seq_len, hid_size]
+        # input: [bs*4, seq_len, hid_size]
         if self.args.using_attention_for_kcr:
-            # outputs[0]: [B*1, L, H] => [B*1, 5, H]
+            # outputs[0]: [B*4, L, H] => [B*4, 5, H]
             h12 = self.att_merge(input, attention_mask, mlm_mask)
-            # [B*1, 5, H] => [B*1, 5, 1] => [B, 5, 1]
+            # [B*1, 5, H] => [B*1, 5, 1] => [B*1, 5, 1]
             logits = self.classify_head(h12)
         else:
             # bs, 5, 1
@@ -412,9 +412,11 @@ class AttentionMergeWithConcatChoices(nn.Module):
     """
     H (B, L, hidden_size) => h (B, hidden_size)
     """
-    def __init__(self, input_size, attention_size, dropout_prob):
+    def __init__(self, args, input_size, attention_size, dropout_prob, num_cat_choices):
         super(AttentionMergeWithConcatChoices, self).__init__()
+        self.args = args
         self.attention_size = attention_size
+        self.num_cat_choices = num_cat_choices
         self.hidden_layer = nn.Linear(input_size, self.attention_size)
         self.query_ = nn.Parameter(torch.Tensor(self.attention_size, 1))
         self.dropout = nn.Dropout(dropout_prob)
@@ -429,6 +431,8 @@ class AttentionMergeWithConcatChoices(nn.Module):
             mask = torch.zeros_like(values)
             # mask = mask.data.normal_(mean=0.0, std=0.02)
         else:
+            end_idx = mask.sum(dim=-1) # (bs)
+            end_idx = end_idx.cpu().numpy().tolist()
             mask = (1 - mask.unsqueeze(-1).type(torch.float)) * -1000.
 
         keys = self.hidden_layer(values)
@@ -443,13 +447,12 @@ class AttentionMergeWithConcatChoices(nn.Module):
 
         # 为什么通过相加这个注意力分数
         values = attention_probs + values # (bs, seq_len, hid_size)
-        values = values.repeat(1, 5, 1) # (bs, seq_len*5, hid_size)
+        values = values.repeat(1, self.num_cat_choices, 1) # (bs, seq_len*5, hid_size)
         bs, _, hs = values.shape
-        values = values.view(bs, 5, -1, hs) # (bs, 5, seq_len, hid_size)
+        values = values.view(bs, self.num_cat_choices, -1, hs) # (bs, 5, seq_len, hid_size)
 
         mlm_mask_extend = torch.zeros_like(mlm_mask) # (bs,seq_len)
-        mlm_mask_extend = mlm_mask_extend.repeat(1,5).view(bs,5,-1) # (bs,5,seq_len)
-        end_idx = mlm_mask.sum(dim=-1) # (bs)
+        mlm_mask_extend = mlm_mask_extend.repeat(1, self.num_cat_choices).view(bs, self.num_cat_choices, -1) # (bs,5,seq_len)
         bs, sl = mlm_mask.shape
         for i in range(bs):
             start = 0
@@ -459,11 +462,14 @@ class AttentionMergeWithConcatChoices(nn.Module):
                     if start == 0:
                         start = j
                     else:
-                        mlm_mask_extend[i, count, start+1:j-1] = 1
-                        # mlm_mask_extend[i, count, start + 1:j] = 1
+                        if "roberta" in self.args.encoder:
+                            mlm_mask_extend[i, count, start+1:j-1] = 1
+                        elif "albert" in self.args.encoder:
+                            mlm_mask_extend[i, count, start+1:j] = 1
+                        # mlm_mask_extend[i, count, start + 1:j - 1] = 1
                         start = j
                         count += 1
-            mlm_mask_extend[i, count, start+1:end_idx[i]-1] = 1
+            mlm_mask_extend[i, count, (start+1):(end_idx[i]-1)] = 1
         mlm_mask_extend = mlm_mask_extend.unsqueeze(-1) # (bs, 5, seq_len, 1)
         values = torch.mul(mlm_mask_extend, values) # (bs, 5, sl, hs)
         context = torch.sum(values, dim=2) # (bs, 5, hs)
