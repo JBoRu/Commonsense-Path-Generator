@@ -188,7 +188,6 @@ def main():
     else:
         raise ValueError('Invalid mode')
 
-
 def freeze_and_unfreeze_net(model, args):
     if args.freeze_enc:
         freeze_net(model.encoder)
@@ -223,7 +222,6 @@ def seed_torch(seed=1029):
     # torch.cuda.manual_seed_all(seed)  # if you are using multi-GPU.
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
-
 
 def train(args):
     # print(args)
@@ -275,27 +273,20 @@ def train(args):
 
     # initialize dataloader
     if args.experiment_base == "p-tuning":
-        dataset = LMRelationNetDataLoader(args, path_embedding_path,
-                                          args.train_statements, args.train_rel_paths,
-                                          args.dev_statements, args.dev_rel_paths,
-                                          args.test_statements, args.test_rel_paths,
-                                          batch_size=args.batch_size, eval_batch_size=args.eval_batch_size,
-                                          device=device,
-                                          model_name=args.encoder,
-                                          max_tuple_num=args.max_tuple_num, max_seq_length=args.max_seq_len,
-                                          is_inhouse=args.inhouse, inhouse_train_qids_path=args.inhouse_train_qids,
-                                          use_contextualized=use_contextualized,
-                                          train_adj_path=args.train_adj, dev_adj_path=args.dev_adj,
-                                          test_adj_path=args.test_adj,
-                                          train_node_features_path=args.train_node_features,
-                                          dev_node_features_path=args.dev_node_features,
-                                          test_node_features_path=args.test_node_features, node_feature_type=args.node_feature_type)
+        dataset = LMRelationNetDataLoader(args, args.train_statements, args.dev_statements, args.test_statements,
+                                batch_size=args.batch_size, eval_batch_size=args.eval_batch_size,
+                                device=device, model_name=args.encoder, max_seq_length=args.max_seq_len,
+                                is_inhouse=args.inhouse, inhouse_train_qids_path=args.inhouse_train_qids)
     elif args.experiment_base == "kcr":
         dataset = KCRDataLoader(args, args.train_statements, args.dev_statements, args.test_statements,
                                 batch_size=args.batch_size, eval_batch_size=args.eval_batch_size,
                                 device=device, model_name=args.encoder, max_seq_length=args.max_seq_len,
                                 is_inhouse=args.inhouse, inhouse_train_qids_path=args.inhouse_train_qids)
-
+    elif args.experiment_base == "NLI":
+        dataset = NLIDataLoader(args, args.train_statements, args.dev_statements, args.test_statements,
+                                          batch_size=args.batch_size, eval_batch_size=args.eval_batch_size,
+                                          device=device, model_name=args.encoder, max_seq_length=args.max_seq_len,
+                                          is_inhouse=args.inhouse, inhouse_train_qids_path=args.inhouse_train_qids)
     ###################################################################################################
     #   Build model                                                                                   #
     ###################################################################################################
@@ -378,6 +369,13 @@ def train(args):
                                           prompt_token_num=args.prompt_token_num,
                                           init_range=args.init_range)
             freeze_and_unfreeze_net(model, args)
+    elif args.experiment_base == "NLI":
+        if args.input_format in ['soft_prompt_p_tuning_classify']:
+            model = PromptWithNLIClassify(args=args, model_name=args.encoder, label_list_len=2,
+                                            from_checkpoint=args.from_checkpoint,
+                                            prompt_token_num=args.prompt_token_num,
+                                            init_range=args.init_range)
+            freeze_and_unfreeze_net(model, args)
 
     try:
         model.to(device)
@@ -446,7 +444,7 @@ def train(args):
     print('\ttotal:', num_params)
 
     if args.loss == 'margin_rank':
-        loss_func = nn.MarginRankingLoss(margin=0.1, reduction='mean')
+        loss_func = nn.MarginRankingLoss(margin=0.15, reduction='mean')
     elif args.loss == 'cross_entropy':
         loss_func = nn.CrossEntropyLoss(reduction='mean')
 
@@ -459,16 +457,21 @@ def train(args):
     global_step, best_dev_epoch = 0, 0
     best_dev_acc, final_test_acc, total_loss = 0.0, 0.0, 0.0
     start_time = time.time()
-    model.train()
-    # freeze_net(model.encoder)
-    # try:
     rel_grad = []
     linear_grad = []
-    if args.input_format in ['soft_prompt_p_tuning_classify']:
-        if args.concat_two_choices:
-            dev_acc = evaluate_accuracy_prompt_with_classify_head_for_cat_two_cho(dataset.dev(), model, type='dev')
-            test_acc = 0.0
-        print('| Before training | dev_acc {:7.4f} | test_acc {:7.4f} |'.format(dev_acc, test_acc))
+    # model.eval()
+    # if args.input_format in ['soft_prompt_p_tuning_classify']:
+    #     if args.concat_two_choices:
+    #         dev_acc = evaluate_accuracy_prompt_with_classify_head_for_cat_two_cho(dataset.dev(), model, type='dev')
+    #         test_acc = 0.0
+    #     else:
+    #         dev_acc = evaluate_accuracy_prompt_with_classify_head(dataset.dev(), model, type='dev')
+    #         test_acc = evaluate_accuracy_prompt_with_classify_head(dataset.test(), model, type='test') \
+    #             if dataset.test_size() > 0 else 0.0
+    #
+    #     print('| Before training | dev_acc {:7.4f} | test_acc {:7.4f} |'.format(dev_acc, test_acc))
+
+    model.train()
     for epoch_id in range(args.n_epochs):
         # if epoch_id == args.unfreeze_epoch:
         #     print('encoder unfreezed')
@@ -493,11 +496,15 @@ def train(args):
 
                 if args.loss == 'margin_rank':
                     num_choice = logits.size(1)
-                    flat_logits = logits.view(-1)
-                    correct_mask = F.one_hot(labels, num_classes=num_choice).view(-1)  # of length batch_size*num_choice
-                    correct_logits = flat_logits[correct_mask == 1].contiguous().view(-1, 1).expand(-1, num_choice - 1).contiguous().view(-1)  # of length batch_size*(num_choice-1)
-                    wrong_logits = flat_logits[correct_mask == 0]  # of length batch_size*(num_choice-1)
-                    y = wrong_logits.new_ones((wrong_logits.size(0),))
+                    flat_logits = logits.view(-1) # (bs,5)
+                    correct_mask = F.one_hot(labels, num_classes=num_choice).view(-1)  # of length batch_size*num_choice (bs, 5)
+                    # print("Labels: ", labels.shape, "One hot mask: ", correct_mask.shape)
+                    correct_logits = flat_logits[correct_mask == 1].contiguous().view(-1, 1).expand(-1, num_choice - 1).contiguous().view(-1)  # (batch_size*(num_choice-1),)
+                    # print("Correct logits: ", correct_logits.shape)
+                    wrong_logits = flat_logits[correct_mask == 0]  # (bs*num_choice-1,)
+                    # print("Wrong logits: ", wrong_logits.shape)
+                    y = wrong_logits.new_ones((wrong_logits.size(0),)) # (bs*num_choice-1,)
+                    # print("Label logits: ", y.shape)
                     loss = loss_func(correct_logits, wrong_logits, y)  # margin ranking loss
                 elif args.loss == 'cross_entropy':
                     if args.input_format in ['pg_kg_enc_as_prompt', 'manual_hard_prompt', 'soft_prompt_p_tuning', 'GPT_kg_generator_as_prompt']:

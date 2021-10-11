@@ -60,6 +60,9 @@ def add_data_arguments(parser):
     parser.add_argument('--train_statements', default='./data/{dataset}/{ir}statement/csqa_kcr/train.statement.jsonl')
     parser.add_argument('--dev_statements', default='./data/{dataset}/{ir}statement/csqa_kcr/dev.statement.jsonl')
     parser.add_argument('--test_statements', default='./data/{dataset}/{ir}statement/csqa_kcr/test.statement.jsonl')
+    # parser.add_argument('--train_statements', default='./data/{dataset}/{ir}statement/train.statement.jsonl')
+    # parser.add_argument('--dev_statements', default='./data/{dataset}/{ir}statement/dev.statement.jsonl')
+    # parser.add_argument('--test_statements', default='./data/{dataset}/{ir}statement/test.statement.jsonl')
     parser.add_argument('-ckpt', '--from_checkpoint', default='None', help='load from a checkpoint')
     # preprocessing options
     parser.add_argument('-sl', '--max_seq_len', default=64, type=int)

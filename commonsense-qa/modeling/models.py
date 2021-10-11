@@ -337,7 +337,8 @@ class PromptWithKCRClassify(nn.Module):
         self.decoder = SoftPromptEncoder(args=self.args, init_range=init_range, embed_size=self.encoder.sent_dim,
                                          tokenizer=self.encoder.tokenizer, PLM_embeddings=self.encoder.embeddings)
 
-        self.classify_head = ClassifyMLPHeadForKCR(args=self.args, input_size=self.encoder.hidden_dim, output_size=int(self.encoder.hidden_dim/2), init_range=init_range)
+        self.classify_head = ClassifyMLPHeadForKCR(args=self.args, input_size=self.encoder.hidden_dim,
+                                                   att_output_size=int(self.encoder.hidden_dim/2),output_size=1 ,init_range=init_range)
 
 
     def forward(self, *inputs, prompt_data, sample_ids=None, type=None):
@@ -765,3 +766,73 @@ class PromptWithGenerateLMRelationNet(nn.Module):
             f'Verbalization {word} is mapped to a special token {tokenizer.convert_ids_to_tokens(verbalization_id)}'
         assert verbalization_id != tokenizer.unk_token_id, "verbalization was tokenized as <UNK>"
         return verbalization_id
+
+class PromptWithNLIClassify(nn.Module):
+    def __init__(self, args, model_name, label_list_len, from_checkpoint, prompt_token_num, init_range=0):
+        super().__init__()
+        self.args = args
+        self.model_name = model_name
+        self.label_list = [0, 1]
+        label_list_len = len(self.label_list)
+        self.encoder = PromptTextEncoder(args, model_name, label_list_len, from_checkpoint=from_checkpoint)
+
+        self.prompt_token_num = prompt_token_num
+        self.kg_enc_out_size = self.encoder.sent_dim * prompt_token_num
+
+        self.decoder = SoftPromptEncoder(args=self.args, init_range=init_range, embed_size=self.encoder.sent_dim,
+                                         tokenizer=self.encoder.tokenizer, PLM_embeddings=self.encoder.embeddings)
+
+        self.classify_head = ClassifyMLPHeadForKCR(args=self.args, input_size=self.encoder.hidden_dim,
+                                                   att_output_size=int(self.encoder.hidden_dim / 2),
+                                                   output_size= 1,
+                                                   init_range=init_range)
+
+    def forward(self, *inputs, prompt_data, sample_ids=None, type=None):
+        inputs = [x.view(x.size(0) * x.size(1), *x.size()[2:]) for x in
+                  inputs]  # merge the batch dimension and the num_choice dimension
+
+        input_ids, input_mask, segment_ids, output_mask = inputs
+
+        prompt_data = [x.view(x.size(0) * x.size(1), *x.size()[2:]) for x in prompt_data]
+        block_flag, mlm_mask, mlm_label = prompt_data  # (bs*5, max_seq_len) (bs*5, 1)
+
+        # if "roberta" in self.model_name:
+        #     raw_embeds = self.encoder.module.embeddings.word_embeddings(input_ids)
+        # elif "gpt" in self.model_name:
+        #     raw_embeds = self.encoder.module.wte(input_ids)
+        # elif "albert" in self.model_name:
+        #     raw_embeds = self.encoder.module.embeddings.word_embeddings(input_ids)
+        raw_embeds = self.encoder.embeddings(input_ids)
+        raw_embeds = raw_embeds.detach()
+        bs = raw_embeds.shape[0]
+
+        if "soft" in self.args.pattern_format:
+            # (num_prompt, embed_size)
+            device = raw_embeds.device
+            replace_embeds = self.decoder(device)
+            if replace_embeds.shape[-1] != raw_embeds.shape[-1]:
+                print(
+                    "the dim of soft prompt {} and raw embeddings {} is different".format(replace_embeds.shape[-1],
+                                                                                          raw_embeds.shape[-1]))
+            assert (block_flag == 1).nonzero().shape[0] != 0
+            blocked_indices = (block_flag == 1).nonzero().reshape((-1, self.prompt_token_num, 2))[:, :, 1]
+            for bidx in range(bs):
+                for i in range(blocked_indices.shape[1]):
+                    raw_embeds[bidx, blocked_indices[bidx, i], :] = replace_embeds[i, :]
+
+        inputs = {'inputs_embeds': raw_embeds, 'attention_mask': input_mask}
+
+        if "albert" in self.model_name:
+            outputs = self.encoder(inputs_embeds=inputs['inputs_embeds'],
+                                   attention_mask=inputs['attention_mask'],
+                                   token_type_ids=segment_ids)
+        else:
+            outputs = self.encoder(inputs_embeds=inputs['inputs_embeds'],
+                                   attention_mask=inputs['attention_mask'],
+                                   token_type_ids=None)
+
+        hidden_states = outputs[0]  # (bs*5, max_len, hid_dim)
+
+        logits = self.classify_head(hidden_states, inputs['attention_mask'], mlm_mask)
+        logits = logits.view(-1, 5)
+        return logits, None

@@ -306,13 +306,20 @@ class ClassifyMLPHead(nn.Module):
         return output
 
 class ClassifyMLPHeadForKCR(nn.Module):
-    def __init__(self, args, input_size, output_size, init_range):
+    def __init__(self, args, input_size, att_output_size, output_size, init_range):
         super(ClassifyMLPHeadForKCR, self).__init__()
         self.args = args
         self.init_range = init_range
         if self.args.using_attention_for_kcr:
-            self.att_merge = AttentionMerge(input_size, output_size, 0.1)
-        self.classify_head = nn.Sequential(nn.Dropout(0.1), nn.Linear(input_size, 1))
+            self.att_merge = AttentionMerge(input_size, att_output_size, 0.1)
+        self.classify_head = nn.Sequential(nn.Dropout(0.1), nn.Linear(input_size, output_size))
+        # self.classify_head = nn.Sequential(nn.Dropout(0.1),
+        #                                    nn.Linear(input_size, input_size),
+        #                                    nn.Tanh(),
+        #                                    nn.Dropout(0.1),
+        #                                    nn.Linear(input_size, output_size)
+        #                                    )
+        # self.classify_head = nn.Linear(input_size, output_size, bias=False)
 
         if self.init_range > 0:
             self.apply(self._init_weights)
