@@ -374,7 +374,7 @@ class PromptWithKCRClassify(nn.Module):
 
         inputs = {'inputs_embeds': raw_embeds, 'attention_mask': input_mask}
 
-        if "albert" in self.model_name:
+        if "albert" in self.model_name or "bert" in self.model_name:
             outputs = self.encoder(inputs_embeds=inputs['inputs_embeds'],
                                    attention_mask=inputs['attention_mask'],
                                    token_type_ids=segment_ids)

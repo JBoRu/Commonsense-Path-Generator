@@ -444,7 +444,7 @@ def train(args):
     print('\ttotal:', num_params)
 
     if args.loss == 'margin_rank':
-        loss_func = nn.MarginRankingLoss(margin=0.15, reduction='mean')
+        loss_func = nn.MarginRankingLoss(margin=args.margin, reduction='mean')
     elif args.loss == 'cross_entropy':
         loss_func = nn.CrossEntropyLoss(reduction='mean')
 

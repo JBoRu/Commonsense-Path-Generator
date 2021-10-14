@@ -205,6 +205,9 @@ class PromptTextEncoder(nn.Module):
                 path = "/mnt/nlp_model/gpt2-medium/"
         elif self.model_type == 'albert':
             path = "/mnt/nlp_model/albert-xxlarge-v2/"
+        elif self.model_type == 'bert':
+            if model_name == 'bert-large-cased':
+                path = "/mnt/nlp_model/bert-large-cased"
 
         model_config = config_class.from_pretrained(path, num_labels=label_list_len)
         print("Load model from %s"%path)
@@ -217,7 +220,7 @@ class PromptTextEncoder(nn.Module):
         model_class = self.model_dict['model']
         self.module = model_class.from_pretrained(path, config=model_config)
 
-        if self.model_type == 'roberta':
+        if self.model_type in ['roberta','bert']:
             prompt_token = '[PROMPT]'
             self.tokenizer.add_tokens([prompt_token])
             self.module.resize_token_embeddings(len(self.tokenizer))
@@ -259,6 +262,11 @@ class PromptTextEncoder(nn.Module):
                 self.embeddings = self.module.embeddings.word_embeddings
             except:
                 self.embeddings = self.module.roberta.embeddings.word_embeddings
+        elif "bert" in model_name:
+            try:
+                self.embeddings = self.module.embeddings.word_embeddings
+            except:
+                self.embeddings = self.module.bert.embeddings.word_embeddings
         elif "gpt" in model_name:
             try:
                 self.embeddings = self.module.wte

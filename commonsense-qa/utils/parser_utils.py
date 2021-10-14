@@ -114,6 +114,8 @@ def add_optimization_arguments(parser):
     parser.add_argument('--weight_decay', default=1e-2, type=float, help='l2 weight decay strength')
     parser.add_argument('--n_epochs', default=100, type=int, help='total number of training epochs to perform.')
     parser.add_argument('-me', '--max_epochs_before_stop', default=3, type=int, help='stop training if dev does not increase for N epochs')
+    parser.add_argument('--margin', default=0.15, type=float, help='margin of ranking loss')
+
 
 
 def add_additional_arguments(parser):
