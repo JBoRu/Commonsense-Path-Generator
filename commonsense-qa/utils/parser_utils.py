@@ -63,7 +63,15 @@ def add_data_arguments(parser):
     # parser.add_argument('--train_statements', default='./data/{dataset}/{ir}statement/train.statement.jsonl')
     # parser.add_argument('--dev_statements', default='./data/{dataset}/{ir}statement/dev.statement.jsonl')
     # parser.add_argument('--test_statements', default='./data/{dataset}/{ir}statement/test.statement.jsonl')
+    # parser.add_argument('--train_statements', default='./data/{dataset}/train.txt')
+    # parser.add_argument('--dev_statements', default='./data/{dataset}/dev.txt')
+    # parser.add_argument('--test_statements', default='./data/{dataset}/test.txt')
+    # parser.add_argument('--train_statements', default='./data/{dataset}/train_postprocess_choose_1.txt')
+    # parser.add_argument('--dev_statements', default='./data/{dataset}/dev_postprocess_choose_1.txt')
+    # parser.add_argument('--test_statements', default='./data/{dataset}/test_postprocess_choose_1.txt')
     parser.add_argument('-ckpt', '--from_checkpoint', default='None', help='load from a checkpoint')
+    parser.add_argument('-ckpt_path', '--checkpoint_path', default='None', help='load from a continue pretrain checkpoint')
+    parser.add_argument('-cache', default='None', help='load from a cache')
     # preprocessing options
     parser.add_argument('-sl', '--max_seq_len', default=64, type=int)
     # set dataset defaults
@@ -110,6 +118,7 @@ def add_optimization_arguments(parser):
     parser.add_argument('--warmup_steps', type=float, default=150)
     parser.add_argument('--warmup_proportion', type=float, default=0.1)
     parser.add_argument('--max_steps', type=int)
+    parser.add_argument('--save_checkpoint', type=int, default=0)
     parser.add_argument('--max_grad_norm', default=1.0, type=float, help='max grad norm (0 to disable)')
     parser.add_argument('--weight_decay', default=1e-2, type=float, help='l2 weight decay strength')
     parser.add_argument('--n_epochs', default=100, type=int, help='total number of training epochs to perform.')

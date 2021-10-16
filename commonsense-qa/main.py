@@ -173,11 +173,11 @@ def main():
     for k, v in sorted(vars(args).items()):
         print(k, '=', v)
 
-    # find relations between question entities and answer entities
-    find_relational_paths(args.cpnet_vocab_path, args.cpnet_graph_path, args.train_concepts, args.train_rel_paths, args.nprocs, args.use_cache)
-    find_relational_paths(args.cpnet_vocab_path, args.cpnet_graph_path, args.dev_concepts, args.dev_rel_paths, args.nprocs, args.use_cache)
-    if args.test_statements is not None:
-        find_relational_paths(args.cpnet_vocab_path, args.cpnet_graph_path, args.test_concepts, args.test_rel_paths, args.nprocs, args.use_cache)
+    # # find relations between question entities and answer entities
+    # find_relational_paths(args.cpnet_vocab_path, args.cpnet_graph_path, args.train_concepts, args.train_rel_paths, args.nprocs, args.use_cache)
+    # find_relational_paths(args.cpnet_vocab_path, args.cpnet_graph_path, args.dev_concepts, args.dev_rel_paths, args.nprocs, args.use_cache)
+    # if args.test_statements is not None:
+    #     find_relational_paths(args.cpnet_vocab_path, args.cpnet_graph_path, args.test_concepts, args.test_rel_paths, args.nprocs, args.use_cache)
 
     if args.mode == 'train':
         train(args)
@@ -254,17 +254,17 @@ def train(args):
         use_contextualized = False
 
     # load concept entity embeddings
-    cp_emb = [np.load(path) for path in args.ent_emb_paths]
-    cp_emb = torch.tensor(np.concatenate(cp_emb, 1))
-    concept_num, concept_dim = cp_emb.size(0), cp_emb.size(1)
+    # cp_emb = [np.load(path) for path in args.ent_emb_paths]
+    # cp_emb = torch.tensor(np.concatenate(cp_emb, 1))
+    # concept_num, concept_dim = cp_emb.size(0), cp_emb.size(1)
 
     # load concrpt relation embeddings
-    rel_emb = np.load(args.rel_emb_path)
-    rel_emb = np.concatenate((rel_emb, -rel_emb), 0)
-    rel_emb = cal_2hop_rel_emb(rel_emb)
-    rel_emb = torch.tensor(rel_emb)
-    relation_num, relation_dim = rel_emb.size(0), rel_emb.size(1)
-    print('| num_concepts: {} | num_relations: {} |'.format(concept_num, relation_num))
+    # rel_emb = np.load(args.rel_emb_path)
+    # rel_emb = np.concatenate((rel_emb, -rel_emb), 0)
+    # rel_emb = cal_2hop_rel_emb(rel_emb)
+    # rel_emb = torch.tensor(rel_emb)
+    # relation_num, relation_dim = rel_emb.size(0), rel_emb.size(1)
+    # print('| num_concepts: {} | num_relations: {} |'.format(concept_num, relation_num))
 
     device = torch.device('cuda:{}'.format(args.gpu_device) if torch.cuda.is_available() else 'cpu')
 
@@ -277,16 +277,15 @@ def train(args):
                                 batch_size=args.batch_size, eval_batch_size=args.eval_batch_size,
                                 device=device, model_name=args.encoder, max_seq_length=args.max_seq_len,
                                 is_inhouse=args.inhouse, inhouse_train_qids_path=args.inhouse_train_qids)
-    elif args.experiment_base == "kcr":
+    elif args.experiment_base in ["kcr","continue_train_with_kcr"]:
         dataset = KCRDataLoader(args, args.train_statements, args.dev_statements, args.test_statements,
                                 batch_size=args.batch_size, eval_batch_size=args.eval_batch_size,
                                 device=device, model_name=args.encoder, max_seq_length=args.max_seq_len,
                                 is_inhouse=args.inhouse, inhouse_train_qids_path=args.inhouse_train_qids)
-    elif args.experiment_base == "NLI":
+    elif args.experiment_base == "inter_pretrain_nli":
         dataset = NLIDataLoader(args, args.train_statements, args.dev_statements, args.test_statements,
-                                          batch_size=args.batch_size, eval_batch_size=args.eval_batch_size,
-                                          device=device, model_name=args.encoder, max_seq_length=args.max_seq_len,
-                                          is_inhouse=args.inhouse, inhouse_train_qids_path=args.inhouse_train_qids)
+                                batch_size=args.batch_size, eval_batch_size=args.eval_batch_size,
+                                device=device, model_name=args.encoder, max_seq_length=args.max_seq_len, num_label=3)
     ###################################################################################################
     #   Build model                                                                                   #
     ###################################################################################################
@@ -369,13 +368,34 @@ def train(args):
                                           prompt_token_num=args.prompt_token_num,
                                           init_range=args.init_range)
             freeze_and_unfreeze_net(model, args)
-    elif args.experiment_base == "NLI":
+    elif args.experiment_base == "inter_pretrain_nli":
         if args.input_format in ['soft_prompt_p_tuning_classify']:
-            model = PromptWithNLIClassify(args=args, model_name=args.encoder, label_list_len=2,
-                                            from_checkpoint=args.from_checkpoint,
-                                            prompt_token_num=args.prompt_token_num,
-                                            init_range=args.init_range)
+            # model = PromptWithNLIClassify(args=args, model_name=args.encoder, label_list_len=2,
+            #                                 from_checkpoint=args.from_checkpoint,
+            #                                 prompt_token_num=args.prompt_token_num,
+            #                                 init_range=args.init_range)
+            model = PromptWithKCRClassify(args=args, model_name=args.encoder, label_list=[0,1,2],
+                                          from_checkpoint=args.from_checkpoint,
+                                          prompt_token_num=args.prompt_token_num,
+                                          init_range=args.init_range)
             freeze_and_unfreeze_net(model, args)
+    elif args.experiment_base == "continue_train_with_kcr":
+        model = PromptWithKCRClassify(args=args, model_name=args.encoder, label_list=[0, 1, 2, 3, 4],
+                                      from_checkpoint=args.from_checkpoint,
+                                      prompt_token_num=args.prompt_token_num,
+                                      init_range=args.init_range)
+        checkpoint_path = args.checkpoint_path
+        check_model, check_args = torch.load(checkpoint_path, map_location='cpu')
+        new_dict = {}
+        for k, v in check_model.state_dict().items():
+            if k not in model.state_dict():
+                print(k)
+                continue
+            new_dict[k] = v
+        model_dict = model.state_dict()
+        model_dict.update(new_dict)
+        model.load_state_dict(model_dict)
+        print("Load pretrained parameters from ", checkpoint_path)
 
     try:
         model.to(device)
@@ -580,6 +600,12 @@ def train(args):
         print('-' * 71)
         with open(log_path, 'a') as fout:
             fout.write('{},{},{}\n'.format(global_step, dev_acc, test_acc))
+
+        if args.save_checkpoint > 0 and (epoch_id+1) % args.save_checkpoint == 0:
+            check_model_path = os.path.join(args.save_dir, 'model.pt') + "epoch_id"
+            torch.save([model, args], check_model_path)
+            print(f'Checkpoint model saved to {check_model_path}')
+
         if dev_acc >= best_dev_acc:
             best_dev_acc = dev_acc
             final_test_acc = test_acc

@@ -182,7 +182,7 @@ class TextEncoder(nn.Module):
 class PromptTextEncoder(nn.Module):
     valid_model_types = set(MODEL_CLASS_TO_NAME.keys())
 
-    def __init__(self, args, model_name, label_list_len, from_checkpoint=None):
+    def __init__(self, args, model_name, label_list_len=None, from_checkpoint=None):
         super().__init__()
         self.model_type = MODEL_NAME_TO_CLASS[model_name]
         if 'classify' in args.input_format:
@@ -209,7 +209,7 @@ class PromptTextEncoder(nn.Module):
             if model_name == 'bert-large-cased':
                 path = "/mnt/nlp_model/bert-large-cased"
 
-        model_config = config_class.from_pretrained(path, num_labels=label_list_len)
+        model_config = config_class.from_pretrained(path)
         print("Load model from %s"%path)
 
         print("Loading plm tokenizer....")
@@ -225,19 +225,19 @@ class PromptTextEncoder(nn.Module):
             self.tokenizer.add_tokens([prompt_token])
             self.module.resize_token_embeddings(len(self.tokenizer))
 
-        if not from_checkpoint == 'None':
-            # self.module = self.module.from_pretrained(from_checkpoint, config=module_config, cache_dir='../cache/')
-            weight = torch.load(from_checkpoint, map_location='cpu')
-            new_dict = {}
-            for k, v in weight.items():
-                nk = k.replace('_transformer_model.', '')
-                if nk not in self.module.state_dict():
-                    print(k)
-                    continue
-                new_dict[nk] = v
-            model_dict = self.module.state_dict()
-            model_dict.update(new_dict)
-            self.module.load_state_dict(model_dict)
+        # if not from_checkpoint == 'None':
+        #     # self.module = self.module.from_pretrained(from_checkpoint, config=module_config, cache_dir='../cache/')
+        #     weight = torch.load(from_checkpoint, map_location='cpu')
+        #     new_dict = {}
+        #     for k, v in weight.items():
+        #         nk = k.replace('_transformer_model.', '')
+        #         if nk not in self.module.state_dict():
+        #             print(k)
+        #             continue
+        #         new_dict[nk] = v
+        #     model_dict = self.module.state_dict()
+        #     model_dict.update(new_dict)
+        #     self.module.load_state_dict(model_dict)
 
         if self.model_type in ('gpt',):
             self.tokenizer.add_tokens(GPT_SPECIAL_TOKENS)

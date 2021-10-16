@@ -2,7 +2,9 @@ import pickle
 
 # import dgl
 import random
+import string
 
+import json
 import numpy as np
 import torch
 from transformers import (GPT2Tokenizer, BertTokenizer, XLNetTokenizer, RobertaTokenizer, AlbertTokenizer)
@@ -1461,14 +1463,13 @@ def load_roberta_input_tensors(args, statement_jsonl_path, model_type, model_nam
     assert len(prompt_data_tensors) == 3, "Prompt data tensor error"
     return (example_ids, all_label, *data_tensors, prompt_data_tensors)
 
-def load_roberta_input_tensors_for_nli(args, statement_jsonl_path, model_class, model_name, max_seq_length, num_prompt_token):
+def load_roberta_input_tensors_for_nli(args, statement_jsonl_path, model_class, model_name, max_seq_length,
+                                       num_prompt_token, num_label, cache=None):
     class InputExample(object):
-        def __init__(self, example_id, question, questions, choices, statements, label=None):
+        def __init__(self, example_id, precises, hypothesises, label=None):
             self.example_id = example_id
-            self.question = question
-            self.questions = questions
-            self.choices = choices
-            self.statements = statements
+            self.precises = precises
+            self.hypothesises = hypothesises
             self.label = label
 
     class InputFeatures(object):
@@ -1489,157 +1490,91 @@ def load_roberta_input_tensors_for_nli(args, statement_jsonl_path, model_class, 
             ]
             self.label = label
 
-    def read_examples(input_file):
-        with open(input_file, "r", encoding="utf-8") as f:
+    def read_examples(input_file, num_label):
+        # with open(input_file, "r") as f:
+        #     examples = []
+        #     for line in f.readlines():
+        #         line = line.strip("\n").split("\t")
+        #         id, pre, hyp, label = [s.strip() for s in line]
+        #         premises = []
+        #         hypothesises = []
+        #         relations = []
+        #         premises.append(pre)
+        #         hypothesises.append(hyp)
+        #         premises = premises * num_label
+        #         hypothesises = hypothesises * num_label
+        #         relations = ["contradiction", "neutral", "entailment"]
+        #         examples.append(
+        #             InputExample(
+        #                 example_id=id,
+        #                 precises=premises,
+        #                 hypothesises=hypothesises,
+        #                 relations=relations,
+        #                 label=label
+        #             ))
+        with open(input_file, "r") as f:
             examples = []
-            for line in f.readlines():
-                json_dic = json.loads(line)
-                choices = json_dic['question']['choices']
-                question_concept = json_dic['question']['question_concept']
-                label = ord(json_dic["answerKey"]) - ord("A") if 'answerKey' in json_dic else 0
-                question = json_dic["question"]["stem"]
-                statements = json_dic["statements"]
-
-                choices_str_list = []
-                questions_list = []
-                statements_list = []
-                for i in range(len(choices)):
-                    choice = choices[i]
-                    choices_str_list.append(choice['text'])
-                    questions_list.append(question)
-                    statements_list.append(statements[i]['statement'])
-
+            for id, line in enumerate(f.readlines()):
+                line = line.strip("\n")
+                line_dict = json.loads(line)
+                precise = line_dict["p"]
+                c = line_dict["c"]
+                n = line_dict["n"]
+                e = line_dict["e"]
+                shuffle_list = [{"c":c},{"n":n},{"e":e}]
+                random.shuffle(shuffle_list)
+                premises = []
+                hypothesises = []
+                label = 0
+                for idx, hyp_dict in enumerate(shuffle_list):
+                    rel, hyp = [kv for kv in hyp_dict.items()][0]
+                    premises.append(precise)
+                    hypothesises.append(hyp)
+                    if rel=="e":
+                        label = idx
                 examples.append(
                     InputExample(
-                        example_id=json_dic["id"],
-                        questions=questions_list,
-                        question=question,
-                        choices=choices_str_list,
-                        statements=statements_list,
+                        example_id=id,
+                        precises=premises,
+                        hypothesises=hypothesises,
                         label=label
-                    ))
+                    )
+                )
         return examples
 
-    def convert_examples_to_features(pattern_type, examples, label_list, max_seq_length, tokenizer, prompt_token="[PROMPT]"):
-        # {0:0, 1:1, 2:2, 3:3, 4:4}
-        label_map = {label: i for i, label in enumerate(label_list)}
+    def convert_examples_to_features(pattern_type, examples, max_seq_length, tokenizer):
+        label_map = {"contradiction":0, "neutral":1, "entailment":2}
         features = []
         pattern_class, pattern_idx = pattern_type.split("_")
         max_seq_length_real = 0
         for ex_index, example in enumerate(examples):
-            label = label_map[example.label]
+            label = example.label
             choices_features = []
-            cdx_list = ["A", "B", "C", "D", "E"]
             # roberta: <s>premise</s></s>statement</s>
             # for one sample
-            for ending_idx, (question, choice, statement) in enumerate(zip(example.questions, example.choices, example.statments)):
-                if pattern_class == "no-prompt-cls":
+            for ending_idx, (precise, hypothesis) in enumerate(zip(example.precises, example.hypothesises)):
+                if pattern_class == "hard-prompt-cls":
+                    # if pattern_idx == "0":
+                    #     # TEMPLATE = *cls**sent-_0*?*mask*, *+sentl_1**sep+*
+                    #     rel_mapping = {'contradiction':'No','entailment':'Yes','neutral':'Maybe'}
+                    #     p = precise + "?" if precise[-1].isalpha() else precise[:-1] + "?"
+                    #     hypothesis = hypothesis + "." if hypothesis[-1].isalpha() else hypothesis
+                    #     h = rel_mapping[relation] + ", " + hypothesis.lower()
+                    #     input = tokenizer.cls_token + p + tokenizer.sep_token + tokenizer.sep_token + h + tokenizer.sep_token
+                    #     input_tokens = tokenizer.tokenize(input)
+                    # elif pattern_idx == "1":
+                    #     rel_mapping = {'contradiction': 'which contradicts the previous sentence.',
+                    #                    'entailment': 'which is compatible with the previous sentence.',
+                    #                    'neutral': 'which is irrelevant with the previous sentence.'}
+                    #     p = precise + "." if precise[-1].isalpha() else precise
+                    #     hypothesis = hypothesis + ", " if hypothesis[-1].isalpha() else hypothesis[:-1] + ", "
+                    #     h = hypothesis + rel_mapping[relation]
+                    #     input = tokenizer.cls_token + p + tokenizer.sep_token + tokenizer.sep_token + h + tokenizer.sep_token
+                    #     input_tokens = tokenizer.tokenize(input)
                     if pattern_idx == "0":
-                        input = tokenizer.cls_token + premise + tokenizer.sep_token + tokenizer.sep_token + hypothesis + tokenizer.sep_token
-                        input_tokens = tokenizer.tokenize(input)
-                elif pattern_class == "hard-prompt-cls":
-                    if pattern_idx == "0":
-                        p = question
-                        h = "The answer is " + choice + "."
+                        p = precise + "." if precise[-1].isalpha() else precise
+                        h = hypothesis + "." if hypothesis[-1].isalpha() else hypothesis
                         input = tokenizer.cls_token + p + tokenizer.sep_token + tokenizer.sep_token + h + tokenizer.sep_token
-                        input_tokens = tokenizer.tokenize(input)
-                elif pattern_class == "hard-prompt-gen":
-                    if pattern_idx == "0":
-                        # <s>question</s></s>According to triple</s></s>Is choice the answer? [MASK], it is.
-                        context = context
-                        triple = "According to " + triple
-                        choice = "Is " + ending + " the answer?"
-                        mask = tokenizer.mask_token + ", it is."
-                        input = tokenizer.cls_token + context + tokenizer.sep_token + tokenizer.sep_token + \
-                                triple + tokenizer.sep_token + tokenizer.sep_token + choice + \
-                                " " + mask + tokenizer.sep_token
-                        input_tokens = tokenizer.tokenize(input)
-                    elif pattern_idx == "1":
-                        # <s>question</s></s>c1 t1</s></s>c2 t2</s></s>c3 t3</s></s>According to the choices, is the right answer c1. [MASK]</s>
-                        context = prefix
-                        choice = "According to the choices, is " + ending + " the right answer?"
-                        mask = tokenizer.mask_token
-                        input = context + choice + mask + tokenizer.sep_token
-                        input_tokens = tokenizer.tokenize(input)
-                elif pattern_class == "soft-prompt-cls":
-                    if pattern_idx == "0":
-                        # <s>question</s></s>triple</s></s>_ _ _ _ _ _Candidate answer is choice.
-                        context = context
-                        triple = triple
-                        choice = "Candidate answer is " + ending + "."
-                        soft_prompt = " ".join([prompt_token for i in range(num_prompt_token)])
-                        input = tokenizer.cls_token + context + tokenizer.sep_token + tokenizer.sep_token + \
-                                triple + tokenizer.sep_token + tokenizer.sep_token + \
-                                " " + soft_prompt + " " + choice + tokenizer.sep_token
-                        input_tokens = tokenizer.tokenize(input)
-                    elif pattern_idx == "1":
-                        # <s>question</s></s>triple</s></s>_ _ _ choice _ _ _ .
-                        context = context
-                        triple = triple
-                        choice = ending
-                        soft_prompt_1 = " ".join([prompt_token for i in range(0, int(num_prompt_token/2))])
-                        soft_prompt_2 = " ".join([prompt_token for i in range(int(num_prompt_token/2), num_prompt_token)])
-                        input = tokenizer.cls_token + context + tokenizer.sep_token + tokenizer.sep_token + \
-                                triple + tokenizer.sep_token + tokenizer.sep_token + soft_prompt_1 + " " + choice + \
-                                " " + soft_prompt_2 + tokenizer.sep_token
-                        input_tokens = tokenizer.tokenize(input)
-                    elif pattern_idx == "2":
-                        # <s>question</s></s>_ _ _ _ choice</s></s>triple</s> (initialized with hard prompt embeddings)
-                        context = context
-                        triple = triple
-                        choice = ending
-                        soft_prompt = " ".join([prompt_token for i in range(num_prompt_token)])
-                        input = tokenizer.cls_token + context + tokenizer.sep_token + tokenizer.sep_token + \
-                                soft_prompt + choice + tokenizer.sep_token + tokenizer.sep_token + \
-                                triple + tokenizer.sep_token
-                        input_tokens = tokenizer.tokenize(input)
-                elif pattern_class == "soft-prompt-gen":
-                    if pattern_idx == "0":
-                        # <s>question</s></s>triple</s></s>Is choice the answer? _ _ _ _ _ _ [MASK].
-                        context = context
-                        triple = triple
-                        choice = "Is " + ending + " the answer?"
-                        mask = tokenizer.mask_token + "."
-                        soft_prompt = " ".join([prompt_token for i in range(num_prompt_token)])
-                        input = tokenizer.cls_token + context + tokenizer.sep_token + tokenizer.sep_token + \
-                                triple + tokenizer.sep_token + tokenizer.sep_token + choice + \
-                                soft_prompt + mask + tokenizer.sep_token
-                        input_tokens = tokenizer.tokenize(input)
-                    elif pattern_idx == "1":
-                        # <s>question</s></s>triple</s></s>_ _ _ choice _ _ _ [MASK].
-                        context = context
-                        triple = triple
-                        choice = ending
-                        mask = tokenizer.mask_token + "."
-                        soft_prompt = " ".join([prompt_token for i in range(int(num_prompt_token/2))])
-                        input = tokenizer.cls_token + context + tokenizer.sep_token + tokenizer.sep_token + \
-                                triple + tokenizer.sep_token + tokenizer.sep_token + soft_prompt + " " + choice + \
-                                " " + soft_prompt + " " + mask
-                        input_tokens = tokenizer.tokenize(input)
-                    elif pattern_idx == "2":
-                        # <s>question</s></s>triple</s></s>_ choice _ _ _ [MASK], it is. (initialized with hp)
-                        context = context
-                        triple = triple
-                        choice = ending
-                        mask = tokenizer.mask_token
-                        soft_prompt_1 = " ".join([prompt_token for i in range(0,1)]) # is
-                        soft_prompt_2 = " ".join([prompt_token for i in range(1, 4)]) # the answer?
-                        soft_prompt_3 = " ".join([prompt_token for i in range(4, num_prompt_token)]) # , it is.
-                        input = tokenizer.cls_token + context + tokenizer.sep_token + tokenizer.sep_token + \
-                                triple + tokenizer.sep_token + tokenizer.sep_token + soft_prompt_1 + " " + choice + \
-                                " " + soft_prompt_2 + " " + mask + " " + soft_prompt_3 + tokenizer.sep_token
-                        input_tokens = tokenizer.tokenize(input)
-                    elif pattern_idx == "3":
-                        # <s>_ _ _ _ _ _ _</s></s>question</s></s>triple</s></s>Is choice the answer?[MASK].
-                        context = context
-                        triple = triple
-                        choice = "Is " + ending + " the answer?"
-                        mask = tokenizer.mask_token + "."
-                        soft_prompt = " ".join([prompt_token for i in range(num_prompt_token)])
-                        input = tokenizer.cls_token + soft_prompt + tokenizer.sep_token + tokenizer.sep_token + \
-                                context + tokenizer.sep_token + tokenizer.sep_token + \
-                                triple + tokenizer.sep_token + tokenizer.sep_token + \
-                                choice + mask + tokenizer.sep_token
                         input_tokens = tokenizer.tokenize(input)
 
                 if ex_index == ending_idx == 0:
@@ -1664,28 +1599,13 @@ def load_roberta_input_tensors_for_nli(args, statement_jsonl_path, model_class, 
                 # get the mask position, the first is used for insert prompt, the second is used for prediction
                 mask_token_id = tokenizer.convert_tokens_to_ids([tokenizer.mask_token])
                 mask_token_index = [index for index, id in enumerate(input_ids) if id in mask_token_id]
-                prompt_token_id = tokenizer.convert_tokens_to_ids([prompt_token])
-                prompt_token_index = [index for index, id in enumerate(input_ids) if id in prompt_token_id]
+                prompt_token_index = []
 
                 block_flag = [0]*len(input_ids)
                 mlm_mask = [0]*len(input_ids)
-                if pattern_class == "no-prompt-cls":
-                    if pattern_idx == "0":
-                        mlm_mask[0] = 1
-                elif pattern_class == "hard-prompt-cls":
-                    if pattern_idx == "0":
-                        mlm_mask[0] = 1
-                elif pattern_class == "hard-prompt-gen":
-                    mlm_mask[mask_token_index[0]] = 1 # 1 for masked token
-                elif pattern_class == "soft-prompt-cls":
-                    for idx in prompt_token_index:
-                        block_flag[idx] = 1  # 1 for prompt placeholder
-                    mlm_mask[0] = 1
-                elif pattern_class == "soft-prompt-gen":
-                    for idx in prompt_token_index:
-                        block_flag[idx] = 1  # 1 for prompt placeholder
-                    mlm_mask[mask_token_index[0]] = 1 # 1 for masked token
 
+                if pattern_class == "hard-prompt-cls":
+                    mlm_mask[0] = 1
 
                 # Zero-pad up to the sequence length.
                 padding_length = max_seq_length - len(input_ids)
@@ -1703,6 +1623,11 @@ def load_roberta_input_tensors_for_nli(args, statement_jsonl_path, model_class, 
                 assert len(segment_ids) == max_seq_length
                 assert len(block_flag) == max_seq_length
                 assert len(mlm_mask) == max_seq_length
+                # if relation == label:
+                #     mlm_label = 1
+                #     label = ending_idx
+                # else:
+                #     mlm_label = 0
                 mlm_label = 1 if ending_idx == label else 0
                 choices_features.append((input_tokens, input_ids, input_mask, segment_ids, output_mask, block_flag, mlm_mask, mlm_label))
             features.append(InputFeatures(example_id=example.example_id, choices_features=choices_features, label=label))
@@ -1748,12 +1673,17 @@ def load_roberta_input_tensors_for_nli(args, statement_jsonl_path, model_class, 
     tokenizer = RobertaTokenizer.from_pretrained(path)
     prompt_token = '[PROMPT]'
     tokenizer.add_tokens([prompt_token])
-    examples = read_examples(statement_jsonl_path)
-    features = convert_examples_to_features(args.pattern_format, examples, list(range(len(examples[0].endings))),
-                                            max_seq_length, tokenizer, prompt_token=prompt_token)
-    example_ids = [f.example_id for f in features]
-    *data_tensors, all_label, prompt_data_tensors = convert_features_to_tensors(features)
-    assert len(prompt_data_tensors) == 3, "Prompt data tensor error"
+    if os.path.exists(cache):
+        data_frame = torch.load(cache)
+        example_ids, all_label, *data_tensors, prompt_data_tensors = data_frame
+    else:
+        examples = read_examples(statement_jsonl_path, num_label)
+        features = convert_examples_to_features(args.pattern_format, examples, max_seq_length, tokenizer)
+        example_ids = [f.example_id for f in features]
+        *data_tensors, all_label, prompt_data_tensors = convert_features_to_tensors(features)
+        assert len(prompt_data_tensors) == 3, "Prompt data tensor error"
+        data_frame = [example_ids, all_label, *data_tensors, prompt_data_tensors]
+        torch.save(data_frame, cache)
     return (example_ids, all_label, *data_tensors, prompt_data_tensors)
 
 def load_albert_input_tensors_for_nli(args, statement_jsonl_path, model_type, model_name, max_seq_length, num_prompt_token):
@@ -4514,10 +4444,10 @@ def load_input_tensors_for_kcr(args, input_jsonl_path, model_type, model_name, m
             return load_bert_input_tensors_for_kcr(args, input_jsonl_path, model_type, model_name, max_seq_length,
                                                       args.prompt_token_num)
 
-def load_input_tensors_for_nli(args, input_jsonl_path, model_class, model_name, max_seq_length, data_type):
+def load_input_tensors_for_nli(args, input_jsonl_path, model_class, model_name, max_seq_length, data_type, num_label, cache):
     if model_class in ('roberta'):
         return load_roberta_input_tensors_for_nli(args, input_jsonl_path, model_class, model_name, max_seq_length,
-                                                  args.prompt_token_num)
+                                                  args.prompt_token_num, num_label=num_label, cache=cache)
     elif model_class in ("albert"):
         return load_albert_input_tensors_for_nli(args, input_jsonl_path, model_class, model_name, max_seq_length,
                                                  args.prompt_token_num)

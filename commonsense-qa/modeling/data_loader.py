@@ -185,14 +185,12 @@ class NLIDataLoader(object):
 
     def __init__(self, args, train_statement_path, dev_statement_path, test_statement_path,
                  batch_size, eval_batch_size, device, model_name,
-                 max_seq_length=128,
-                 is_inhouse=True, inhouse_train_qids_path=None):
+                 max_seq_length=128, num_label=3):
         super().__init__()
         self.args = args
         self.batch_size = batch_size
         self.eval_batch_size = eval_batch_size
         self.device = device
-        self.is_inhouse = is_inhouse
 
         model_class = MODEL_NAME_TO_CLASS[model_name]
 
@@ -200,51 +198,38 @@ class NLIDataLoader(object):
         print("Load and process input data")
         if self.args.mode == "train":
             self.train_qids, self.train_labels, *self.train_data, self.prompt_train_data = \
-                load_input_tensors_for_nli(self.args, train_statement_path, model_class, model_name, max_seq_length, "train")
+                load_input_tensors_for_nli(self.args, train_statement_path, model_class, model_name, max_seq_length,
+                                           "train", num_label, cache=self.args.cache)
 
         self.dev_qids, self.dev_labels, *self.dev_data, self.prompt_dev_data = \
-            load_input_tensors_for_nli(self.args, dev_statement_path, model_class, model_name, max_seq_length, "eval")
+            load_input_tensors_for_nli(self.args, dev_statement_path, model_class, model_name, max_seq_length,
+                                       "eval", num_label, cache=self.args.cache)
 
-        if self.is_inhouse:
-            with open(inhouse_train_qids_path, 'r') as fin:
-                inhouse_qids = set(line.strip() for line in fin)
-            self.inhouse_train_indexes = torch.tensor([i for i, qid in enumerate(self.train_qids) if qid in inhouse_qids])
-            self.inhouse_test_indexes = torch.tensor([i for i, qid in enumerate(self.train_qids) if qid not in inhouse_qids])
+        self.test_qids, self.test_labels, *self.test_data, self.prompt_test_data = \
+            load_input_tensors_for_nli(self.args, test_statement_path, model_class, model_name, max_seq_length,
+                                       "eval", num_label, cache=self.args.cache)
 
     def __getitem__(self, index):
         raise NotImplementedError()
 
-    def get_node_feature_dim(self):
-        return None
-
     def train_size(self):
-        return self.inhouse_train_indexes.size(0) if self.is_inhouse else len(self.train_qids)
+        return len(self.train_qids)
 
     def dev_size(self):
         return len(self.dev_qids)
 
     def test_size(self):
-        if self.is_inhouse:
-            return self.inhouse_test_indexes.size(0)
-        else:
-            return len(self.test_qids) if hasattr(self, 'test_qids') else 0
+        return len(self.test_qids)
 
     def train(self):
-        if self.is_inhouse:
-            n_train = self.inhouse_train_indexes.size(0)
-            train_indexes = self.inhouse_train_indexes[torch.randperm(n_train)]
-        else:
-            train_indexes = torch.randperm(len(self.train_qids))
-        return BatchGenerator(self.device, self.batch_size, train_indexes, self.train_qids, self.train_labels, tensors=self.train_data, prompt_data=self.prompt_train_data)
-
-    def train_eval(self):
-        return BatchGenerator(self.device, self.eval_batch_size, torch.arange(len(self.train_qids)), self.train_qids, self.train_labels, tensors=self.train_data, prompt_data=self.prompt_train_data)
+        train_indexes = torch.randperm(len(self.train_qids))
+        return BatchGenerator(self.device, self.batch_size, train_indexes, self.train_qids, self.train_labels,
+                              tensors=self.train_data, prompt_data=self.prompt_train_data)
 
     def dev(self):
-        return BatchGenerator(self.device, self.eval_batch_size, torch.arange(len(self.dev_qids)), self.dev_qids, self.dev_labels, tensors=self.dev_data, prompt_data=self.prompt_dev_data)
+        return BatchGenerator(self.device, self.eval_batch_size, torch.arange(len(self.dev_qids)), self.dev_qids,
+                              self.dev_labels, tensors=self.dev_data, prompt_data=self.prompt_dev_data)
 
     def test(self):
-        if self.is_inhouse:
-            return BatchGenerator(self.device, self.eval_batch_size, self.inhouse_test_indexes, self.train_qids, self.train_labels, tensors=self.train_data, prompt_data=self.prompt_train_data)
-        else:
-            return BatchGenerator(self.device, self.eval_batch_size, torch.arange(len(self.test_qids)), self.test_qids, self.test_labels, tensors=self.test_data, prompt_data=self.prompt_test_data)
+        return BatchGenerator(self.device, self.eval_batch_size, torch.arange(len(self.test_qids)), self.test_qids,
+                              self.test_labels, tensors=self.test_data, prompt_data=self.prompt_test_data)

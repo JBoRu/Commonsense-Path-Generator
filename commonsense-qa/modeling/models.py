@@ -323,13 +323,13 @@ class PromptWithClassifyLMRelationNet(nn.Module):
         return cls_logits, None
 
 class PromptWithKCRClassify(nn.Module):
-    def __init__(self, args, model_name, label_list_len, from_checkpoint, prompt_token_num, init_range=0):
+    def __init__(self, args, model_name, label_list, from_checkpoint, prompt_token_num, init_range=0):
         super().__init__()
         self.args = args
         self.model_name = model_name
-        self.label_list = [0, 1]
-        label_list_len = len(self.label_list)
-        self.encoder = PromptTextEncoder(args, model_name, label_list_len, from_checkpoint=from_checkpoint)
+        self.label_list = label_list
+        self.label_list_len = len(self.label_list)
+        self.encoder = PromptTextEncoder(args, model_name, self.label_list_len, from_checkpoint)
 
         self.prompt_token_num = prompt_token_num
         self.kg_enc_out_size = self.encoder.sent_dim * prompt_token_num
@@ -338,8 +338,8 @@ class PromptWithKCRClassify(nn.Module):
                                          tokenizer=self.encoder.tokenizer, PLM_embeddings=self.encoder.embeddings)
 
         self.classify_head = ClassifyMLPHeadForKCR(args=self.args, input_size=self.encoder.hidden_dim,
-                                                   att_output_size=int(self.encoder.hidden_dim/2),output_size=1 ,init_range=init_range)
-
+                                                   att_output_size=int(self.encoder.hidden_dim/2),output_size=1 ,
+                                                   init_range=init_range)
 
     def forward(self, *inputs, prompt_data, sample_ids=None, type=None):
         inputs = [x.view(x.size(0) * x.size(1), *x.size()[2:]) for x in inputs]  # merge the batch dimension and the num_choice dimension
@@ -349,12 +349,6 @@ class PromptWithKCRClassify(nn.Module):
         prompt_data = [x.view(x.size(0) * x.size(1), *x.size()[2:]) for x in prompt_data]
         block_flag, mlm_mask, mlm_label = prompt_data # (bs*5, max_seq_len) (bs*5, 1)
 
-        # if "roberta" in self.model_name:
-        #     raw_embeds = self.encoder.module.embeddings.word_embeddings(input_ids)
-        # elif "gpt" in self.model_name:
-        #     raw_embeds = self.encoder.module.wte(input_ids)
-        # elif "albert" in self.model_name:
-        #     raw_embeds = self.encoder.module.embeddings.word_embeddings(input_ids)
         raw_embeds = self.encoder.embeddings(input_ids)
         raw_embeds = raw_embeds.detach()
         bs = raw_embeds.shape[0]
@@ -386,7 +380,7 @@ class PromptWithKCRClassify(nn.Module):
         hidden_states = outputs[0]  # (bs*5, max_len, hid_dim)
 
         logits = self.classify_head(hidden_states, inputs['attention_mask'], mlm_mask)
-        logits = logits.view(-1, 5)
+        logits = logits.view(-1, self.label_list_len)
         return logits, None
 
 class PromptWithKCRWithConcatChoicesClassify(nn.Module):
@@ -772,9 +766,9 @@ class PromptWithNLIClassify(nn.Module):
         super().__init__()
         self.args = args
         self.model_name = model_name
-        self.label_list = [0, 1]
-        label_list_len = len(self.label_list)
-        self.encoder = PromptTextEncoder(args, model_name, label_list_len, from_checkpoint=from_checkpoint)
+        self.label_list = [0, 1, 2]
+        self.label_list_len = len(self.label_list)
+        self.encoder = PromptTextEncoder(args, model_name, self.label_list_len, from_checkpoint=from_checkpoint)
 
         self.prompt_token_num = prompt_token_num
         self.kg_enc_out_size = self.encoder.sent_dim * prompt_token_num
@@ -796,29 +790,9 @@ class PromptWithNLIClassify(nn.Module):
         prompt_data = [x.view(x.size(0) * x.size(1), *x.size()[2:]) for x in prompt_data]
         block_flag, mlm_mask, mlm_label = prompt_data  # (bs*5, max_seq_len) (bs*5, 1)
 
-        # if "roberta" in self.model_name:
-        #     raw_embeds = self.encoder.module.embeddings.word_embeddings(input_ids)
-        # elif "gpt" in self.model_name:
-        #     raw_embeds = self.encoder.module.wte(input_ids)
-        # elif "albert" in self.model_name:
-        #     raw_embeds = self.encoder.module.embeddings.word_embeddings(input_ids)
         raw_embeds = self.encoder.embeddings(input_ids)
         raw_embeds = raw_embeds.detach()
         bs = raw_embeds.shape[0]
-
-        if "soft" in self.args.pattern_format:
-            # (num_prompt, embed_size)
-            device = raw_embeds.device
-            replace_embeds = self.decoder(device)
-            if replace_embeds.shape[-1] != raw_embeds.shape[-1]:
-                print(
-                    "the dim of soft prompt {} and raw embeddings {} is different".format(replace_embeds.shape[-1],
-                                                                                          raw_embeds.shape[-1]))
-            assert (block_flag == 1).nonzero().shape[0] != 0
-            blocked_indices = (block_flag == 1).nonzero().reshape((-1, self.prompt_token_num, 2))[:, :, 1]
-            for bidx in range(bs):
-                for i in range(blocked_indices.shape[1]):
-                    raw_embeds[bidx, blocked_indices[bidx, i], :] = replace_embeds[i, :]
 
         inputs = {'inputs_embeds': raw_embeds, 'attention_mask': input_mask}
 
@@ -834,5 +808,5 @@ class PromptWithNLIClassify(nn.Module):
         hidden_states = outputs[0]  # (bs*5, max_len, hid_dim)
 
         logits = self.classify_head(hidden_states, inputs['attention_mask'], mlm_mask)
-        logits = logits.view(-1, 5)
+        logits = logits.view(-1, self.label_list_len)
         return logits, None
