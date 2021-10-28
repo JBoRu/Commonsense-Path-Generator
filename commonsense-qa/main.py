@@ -59,13 +59,15 @@ def evaluate_accuracy_prompt_for_concat_choices(eval_set, model, type=None):
             n_samples += labels.size(0)
     return n_correct / n_samples
 
-def evaluate_accuracy_prompt_with_classify_head(eval_set, model, type=None):
+def evaluate_accuracy_prompt_with_classify_head(eval_set, model, type=None, num_choice=5):
     n_samples, n_correct = 0, 0
     model.eval()
     with torch.no_grad():
         for sample_ids, qids, labels, *input_data,  prompt_data in eval_set:
             # (bs*5, 2)
             logits, _ = model(*input_data, prompt_data=prompt_data, sample_ids=sample_ids, type=type)
+            # logits = logits.view(-1,5)
+            logits = logits.view(-1, num_choice)
             n_correct += (logits.argmax(1) == labels).sum().item()
             n_samples += labels.size(0)
     return n_correct / n_samples
@@ -286,6 +288,12 @@ def train(args):
         dataset = NLIDataLoader(args, args.train_statements, args.dev_statements, args.test_statements,
                                 batch_size=args.batch_size, eval_batch_size=args.eval_batch_size,
                                 device=device, model_name=args.encoder, max_seq_length=args.max_seq_len, num_label=3)
+    elif args.experiment_base == "mixed_nli_csqa_kcr":
+        dataset = MixedDataLoader(args, args.train_statements, args.dev_statements, args.test_statements,
+                                batch_size=args.batch_size, eval_batch_size=args.eval_batch_size,
+                                device=device, model_name=args.encoder, max_seq_length=args.max_seq_len, num_label=5,
+                                is_inhouse=args.inhouse, inhouse_train_qids_path=args.inhouse_train_qids)
+
     ###################################################################################################
     #   Build model                                                                                   #
     ###################################################################################################
@@ -357,7 +365,7 @@ def train(args):
                                                                prompt_token_num=args.prompt_token_num,
                                                                init_range=args.init_range)
             else:
-                model = PromptWithKCRClassify(args=args, model_name=args.encoder, label_list_len=2,
+                model = PromptWithKCRClassify(args=args, model_name=args.encoder, label_list=[0, 1, 2, 3, 4],
                                                 from_checkpoint=args.from_checkpoint,
                                                 prompt_token_num=args.prompt_token_num,
                                                 init_range=args.init_range)
@@ -374,7 +382,7 @@ def train(args):
             #                                 from_checkpoint=args.from_checkpoint,
             #                                 prompt_token_num=args.prompt_token_num,
             #                                 init_range=args.init_range)
-            model = PromptWithKCRClassify(args=args, model_name=args.encoder, label_list=[0,1,2],
+            model = PromptWithKCRClassify(args=args, model_name=args.encoder, label_list=[0,1],
                                           from_checkpoint=args.from_checkpoint,
                                           prompt_token_num=args.prompt_token_num,
                                           init_range=args.init_range)
@@ -396,6 +404,13 @@ def train(args):
         model_dict.update(new_dict)
         model.load_state_dict(model_dict)
         print("Load pretrained parameters from ", checkpoint_path)
+    elif args.experiment_base == "mixed_nli_csqa_kcr":
+        if args.input_format in ['soft_prompt_p_tuning_classify']:
+            model = PromptWithKCRClassify(args=args, model_name=args.encoder, label_list=[0,1,2,3,4],
+                                          from_checkpoint=args.from_checkpoint,
+                                          prompt_token_num=args.prompt_token_num,
+                                          init_range=args.init_range)
+            freeze_and_unfreeze_net(model, args)
 
     try:
         model.to(device)
@@ -467,6 +482,8 @@ def train(args):
         loss_func = nn.MarginRankingLoss(margin=args.margin, reduction='mean')
     elif args.loss == 'cross_entropy':
         loss_func = nn.CrossEntropyLoss(reduction='mean')
+    elif args.loss == 'binary_cross_entropy':
+        loss_func = nn.BCEWithLogitsLoss(reduction='mean')
 
     ###################################################################################################
     #   Training                                                                                      #
@@ -513,12 +530,14 @@ def train(args):
                 else:
                     logits, mlm_labels = model(*[x[a:b] for x in input_data], prompt_data=[x[a:b] for x in prompt_data],
                                                sample_ids=sample_ids[a:b], type='train')
+                    # logits = logits.view(-1, self.label_list_len)
 
                 if args.loss == 'margin_rank':
+                    logits = logits.view(-1, args.num_choice)
                     num_choice = logits.size(1)
-                    flat_logits = logits.view(-1) # (bs,5)
-                    correct_mask = F.one_hot(labels, num_classes=num_choice).view(-1)  # of length batch_size*num_choice (bs, 5)
-                    # print("Labels: ", labels.shape, "One hot mask: ", correct_mask.shape)
+                    flat_logits = logits.view(-1) # (bs*5,)
+                    correct_mask = F.one_hot(labels[a:b], num_classes=num_choice).view(-1)  # (bs*5,)
+                    # print("Flat logits: ", flat_logits.shape, "Labels: ", labels[a:b].shape, "One hot mask: ", correct_mask.shape)
                     correct_logits = flat_logits[correct_mask == 1].contiguous().view(-1, 1).expand(-1, num_choice - 1).contiguous().view(-1)  # (batch_size*(num_choice-1),)
                     # print("Correct logits: ", correct_logits.shape)
                     wrong_logits = flat_logits[correct_mask == 0]  # (bs*num_choice-1,)
@@ -540,7 +559,12 @@ def train(args):
                         if args.concat_two_choices:
                             loss = loss_func(logits, mlm_labels)
                         else:
+                            logits = logits.view(-1, args.num_choice)
                             loss = loss_func(logits, labels[a:b])
+                elif args.loss == "binary_cross_entropy":
+                    logits = logits.view(-1) #(bs*5)
+                    mlm_labels = mlm_labels.float()
+                    loss = loss_func(logits, mlm_labels)
 
                 loss = loss * (b - a) / bs
                 loss.backward()
@@ -568,6 +592,10 @@ def train(args):
                 rel_grad = []
                 linear_grad = []
                 start_time = time.time()
+                if args.experiment_base == "inter_pretrain_nli":
+                    check_model_path = os.path.join(args.save_dir, 'model_bs_8_global_step_') + str(global_step)
+                    torch.save([model, args], check_model_path)
+                    print(f'Checkpoint model saved to {check_model_path}')
             global_step += 1
 
         model.eval()
@@ -584,9 +612,11 @@ def train(args):
                 dev_acc = evaluate_accuracy_prompt_with_classify_head_for_cat_two_cho(dataset.dev(), model, type='dev')
                 test_acc = 0.0
             else:
-                dev_acc = evaluate_accuracy_prompt_with_classify_head(dataset.dev(), model, type='dev')
-                test_acc = evaluate_accuracy_prompt_with_classify_head(dataset.test(), model,
-                                                                   type='test') if dataset.test_size() > 0 else 0.0
+                dev_acc = evaluate_accuracy_prompt_with_classify_head(dataset.dev(), model, type='dev',
+                                                                      num_choice=args.num_choice)
+                test_acc = evaluate_accuracy_prompt_with_classify_head(dataset.test(), model, type='test',
+                                                                       num_choice=args.num_choice) \
+                                                                                    if dataset.test_size() > 0 else 0.0
         elif args.input_format in ['p-tuning-GPT-generate']:
             dev_acc = evaluate_accuracy_prompt_with_generate(dataset.dev(), model, type='dev')
             test_acc = evaluate_accuracy_prompt_with_generate(dataset.test(), model,
@@ -602,7 +632,7 @@ def train(args):
             fout.write('{},{},{}\n'.format(global_step, dev_acc, test_acc))
 
         if args.save_checkpoint > 0 and (epoch_id+1) % args.save_checkpoint == 0:
-            check_model_path = os.path.join(args.save_dir, 'model.pt') + "epoch_id"
+            check_model_path = os.path.join(args.save_dir, 'model_bs_8_epoch_') + str(epoch_id)
             torch.save([model, args], check_model_path)
             print(f'Checkpoint model saved to {check_model_path}')
 
@@ -632,7 +662,9 @@ def eval(args):
     dev_pred_path = os.path.join(args.save_dir, 'predictions_dev')
     test_pred_path = os.path.join(args.save_dir, 'predictions_test')
     model_path = os.path.join(args.save_dir, 'model.pt')
+    # model_path = os.path.join(args.save_dir, 'model_bs_8_epoch_2')
     device = torch.device('cuda:{}'.format(args.gpu_device) if torch.cuda.is_available() and args.cuda else "cpu")
+    print("Load trained model form %s"%(model_path))
     model, old_args = torch.load(model_path, map_location=device)
     model.to(device)
     model.eval()
@@ -665,90 +697,20 @@ def eval(args):
                                 is_inhouse=args.inhouse, inhouse_train_qids_path=args.inhouse_train_qids)
 
     print("***** generating model predictions *****")
-    print(f'| dataset: {old_args.dataset} | save_dir: {args.save_dir} |')
+    print(f'| dataset: {args.dataset} | save_dir: {args.save_dir} |')
     output_path = dev_pred_path
     data_loader = dataset.dev()
     n_correct = 0.0
     n_samples = 0.0
+
     with torch.no_grad(), open(output_path, 'w') as fout:
         for id, (sample_ids, qids, labels, *input_data, prompt_data) in enumerate(data_loader):
             # (bs*10, 2)
-            logits, _ = model(*input_data, prompt_data=prompt_data, sample_ids=sample_ids, type=type)
-            logits = logits.view(-1, 10, 2)  # (bs, 10, 2)
-            logits_abs = torch.abs(logits[:, :, 0] - logits[:, :, 1])
-            logits_abs = logits_abs.cpu().numpy().tolist()
-            logits = logits.argmax(dim=-1)  # (bs, 10)
-            num_sap = logits.shape[0]
-            preds = []
-            labels = labels.cpu().numpy().tolist()
-            pred_logits = np.zeros((num_sap, 5, 5))
-            for sid in range(num_sap):
-                win_count = [0] * 5  # [0, 0, 0, 0, 0]
-                idx = 0
-                winer_dict = {}
-                diff_dict = {}
-                for i in range(5):
-                    for j in range(5):
-                        if j > i:
-                            score_diff = logits_abs[sid][idx] if logits[sid][idx] == 0 else (-1.0)*logits_abs[sid][idx]
-                            pred_logits[sid][i][j] = score_diff
-                            # idx += 1
-                            key = str(i) + "_" + str(j)
-                            if logits[sid][idx] == 0:
-                                win_count[i] += 1
-                                winer_dict[key] = i
-                            else:
-                                win_count[j] += 1
-                                winer_dict[key] = j
-                            diff_dict[key] = logits_abs[sid][idx]
-                            idx += 1
-                win_count = np.array(win_count)
-                max = np.max(win_count)
-                flag = (win_count == max)
-                win = []
-                for idx, f in enumerate(flag):
-                    if f:
-                        win.append(idx)
-                if len(win) == 1:
-                    preds.append(win[0])
-                elif len(win) == 2:
-                    key = str(win[0]) + "_" + str(win[1])
-                    preds.append(winer_dict[key])
-                elif len(win) == 3:
-                    key1 = str(win[0]) + "_" + str(win[1])
-                    key2 = str(win[1]) + "_" + str(win[2])
-                    key3 = str(win[0]) + "_" + str(win[2])
-                    s1, w1 = diff_dict[key1], winer_dict[key1]
-                    s2, w2 = diff_dict[key2], winer_dict[key2]
-                    s3, w3 = diff_dict[key3], winer_dict[key3]
-                    score = np.array([s1, s2, s3])
-                    max_s = np.max(score)
-                    flag_s = (score == max_s)
-                    win_s = []
-                    for idx, f in enumerate(flag_s):
-                        if f:
-                            win_s.append(idx)
-                    assert len(win_s) == 1, "Vote error!"
-                    if win_s[0] == 0:
-                        preds.append(w1)
-                    elif win_s[0] == 1:
-                        preds.append(w2)
-                    else:
-                        preds.append(w3)
-            for p, l in zip(preds, labels):
-                if p == l:
-                    n_correct += 1
-            n_samples += len(labels)
-
-            for idx, (qid, label, pred) in enumerate(zip(qids, labels, preds)):
-                title = "Question: " + str(qid) + " Label: " + str(label) + " Pred: " + str(pred)
-                fout.write("{}\n".format(title))
-                for i in range(5):
-                    line_logit = pred_logits[idx][i]
-                    line_logit = "\t".join(["%.3f"%l for l in line_logit])
-                    line_logit = "\t" + line_logit + "\n"
-                    fout.write(line_logit)
-                fout.write("\n")
+            logits, mlm_labels = model(*input_data, prompt_data=prompt_data, sample_ids=sample_ids, type='dev')
+            if args.concat_two_choices:
+                n_correct, n_samples = inference_for_pairwise_ranking(qids, logits, labels, fout, n_correct, n_samples)
+            else:
+                n_correct, n_samples = inference_for_classify_ranking(qids, logits, labels, fout, n_correct, n_samples, args.num_choice)
 
         result = n_correct / n_samples
         result = "Accuracy:%.4f\n" % (result)
@@ -798,6 +760,100 @@ def pred(args):
                     fout.write('{}\n'.format(pred_label))
         print(f'predictions saved to {output_path}')
     print('***** prediction done *****')
+
+def inference_for_pairwise_ranking(qids, logits, labels, fout, n_correct, n_samples):
+    logits = logits.view(-1, 10, 2)  # (bs, 10, 2)
+    logits_abs = torch.abs(logits[:, :, 0] - logits[:, :, 1])
+    logits_abs = logits_abs.cpu().numpy().tolist()
+    logits = logits.argmax(dim=-1)  # (bs, 10)
+    num_sap = logits.shape[0]
+    preds = []
+    labels = labels.cpu().numpy().tolist()
+    pred_logits = np.zeros((num_sap, 5, 5))
+    for sid in range(num_sap):
+        win_count = [0] * 5  # [0, 0, 0, 0, 0]
+        idx = 0
+        winer_dict = {}
+        diff_dict = {}
+        for i in range(5):
+            for j in range(5):
+                if j > i:
+                    score_diff = logits_abs[sid][idx] if logits[sid][idx] == 0 else (-1.0) * logits_abs[sid][idx]
+                    pred_logits[sid][i][j] = score_diff
+                    # idx += 1
+                    key = str(i) + "_" + str(j)
+                    if logits[sid][idx] == 0:
+                        win_count[i] += 1
+                        winer_dict[key] = i
+                    else:
+                        win_count[j] += 1
+                        winer_dict[key] = j
+                    diff_dict[key] = logits_abs[sid][idx]
+                    idx += 1
+        win_count = np.array(win_count)
+        max = np.max(win_count)
+        flag = (win_count == max)
+        win = []
+        for idx, f in enumerate(flag):
+            if f:
+                win.append(idx)
+        if len(win) == 1:
+            preds.append(win[0])
+        elif len(win) == 2:
+            key = str(win[0]) + "_" + str(win[1])
+            preds.append(winer_dict[key])
+        elif len(win) == 3:
+            key1 = str(win[0]) + "_" + str(win[1])
+            key2 = str(win[1]) + "_" + str(win[2])
+            key3 = str(win[0]) + "_" + str(win[2])
+            s1, w1 = diff_dict[key1], winer_dict[key1]
+            s2, w2 = diff_dict[key2], winer_dict[key2]
+            s3, w3 = diff_dict[key3], winer_dict[key3]
+            score = np.array([s1, s2, s3])
+            max_s = np.max(score)
+            flag_s = (score == max_s)
+            win_s = []
+            for idx, f in enumerate(flag_s):
+                if f:
+                    win_s.append(idx)
+            assert len(win_s) == 1, "Vote error!"
+            if win_s[0] == 0:
+                preds.append(w1)
+            elif win_s[0] == 1:
+                preds.append(w2)
+            else:
+                preds.append(w3)
+
+    for p, l in zip(preds, labels):
+        if p == l:
+            n_correct += 1
+    n_samples += len(labels)
+
+    for idx, (qid, label, pred) in enumerate(zip(qids, labels, preds)):
+        title = "Question: " + str(qid) + " Label: " + str(label) + " Pred: " + str(pred)
+        fout.write("{}\n".format(title))
+        for i in range(5):
+            line_logit = pred_logits[idx][i]
+            line_logit = "\t".join(["%.3f" % l for l in line_logit])
+            line_logit = "\t" + line_logit + "\n"
+            fout.write(line_logit)
+        fout.write("\n")
+
+    return n_correct, n_samples
+
+def inference_for_classify_ranking(qids, logits, labels, fout, n_correct, n_samples, num_choice):
+    logits = logits.view(-1, num_choice)
+    preds = logits.argmax(1)
+    preds = preds.cpu().numpy().tolist()
+    n_correct += (logits.argmax(1) == labels).sum().item()
+    n_samples += labels.size(0)
+    labels = labels.cpu().numpy().tolist()
+
+    for idx, (qid, label, pred) in enumerate(zip(qids, labels, preds)):
+        title = str(qid) + "\t" + str(label) + "\t" + str(pred)
+        fout.write("{}\n".format(title))
+
+    return n_correct, n_samples
 
 if __name__ == '__main__':
     main()

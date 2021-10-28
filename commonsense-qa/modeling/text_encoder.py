@@ -196,6 +196,8 @@ class PromptTextEncoder(nn.Module):
         if self.model_type == 'roberta':
             if model_name == 'roberta-large':
                 path = "/mnt/nlp_model/huggingface/roberta-large/"
+                # path = "/mnt/zhoukun/Quebec1/SimCSE/result/my-sup-simcse-roberta-large-uncased"
+                # path = "/mnt/zhoukun/Quebec1/SimCSE/result/my-unsup-simcse-roberta-large-uncased"
             elif model_name == 'roberta-base':
                 path = "/mnt/nlp_model/roberta-base/"
         elif self.model_type == 'gpt':
@@ -209,6 +211,8 @@ class PromptTextEncoder(nn.Module):
             if model_name == 'bert-large-cased':
                 path = "/mnt/nlp_model/bert-large-cased"
 
+        print("Load pretrained file from %s"%(path))
+
         model_config = config_class.from_pretrained(path)
         print("Load model from %s"%path)
 
@@ -220,7 +224,7 @@ class PromptTextEncoder(nn.Module):
         model_class = self.model_dict['model']
         self.module = model_class.from_pretrained(path, config=model_config)
 
-        if self.model_type in ['roberta','bert']:
+        if self.model_type in ['roberta','bert','albert']:
             prompt_token = '[PROMPT]'
             self.tokenizer.add_tokens([prompt_token])
             self.module.resize_token_embeddings(len(self.tokenizer))

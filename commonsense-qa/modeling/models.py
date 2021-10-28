@@ -380,8 +380,7 @@ class PromptWithKCRClassify(nn.Module):
         hidden_states = outputs[0]  # (bs*5, max_len, hid_dim)
 
         logits = self.classify_head(hidden_states, inputs['attention_mask'], mlm_mask)
-        logits = logits.view(-1, self.label_list_len)
-        return logits, None
+        return logits, mlm_label
 
 class PromptWithKCRWithConcatChoicesClassify(nn.Module):
     def __init__(self, args, model_name, label_list_len, from_checkpoint, prompt_token_num, init_range=0):

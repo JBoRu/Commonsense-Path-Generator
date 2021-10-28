@@ -1,3 +1,7 @@
+import random
+
+import torch
+
 from utils.data_utils import *
 from modeling.text_encoder import MODEL_NAME_TO_CLASS
 
@@ -116,7 +120,16 @@ class KCRDataLoader(object):
         self.is_inhouse = is_inhouse
 
         model_type = MODEL_NAME_TO_CLASS[model_name]
+        if args.dataset == 'csqa':
+            self.load_data_from_kcr(train_statement_path,dev_statement_path, inhouse_train_qids_path,
+                                    model_type, model_name, max_seq_length)
+        elif args.dataset == 'csqav2':
+            self.load_data_from_csqav2(train_statement_path, dev_statement_path, inhouse_train_qids_path,
+                                    model_type, model_name, max_seq_length)
 
+
+    def load_data_from_kcr(self,train_statement_path,dev_statement_path,inhouse_train_qids_path,
+                           model_type,model_name,max_seq_length):
         # (num_example), (num_example, 5, max_seq_lem), (num_example, 5)
         print("Load and process input data")
         self.train_qids, self.train_labels, *self.train_data, self.prompt_train_data = \
@@ -126,16 +139,30 @@ class KCRDataLoader(object):
 
         # num_choice = self.train_data[0].size(1)
 
+    def load_data_from_csqav2(self,train_statement_path,dev_statement_path,inhouse_train_qids_path,
+                           model_type,model_name,max_seq_length):
+        # (num_example), (num_example, 5, max_seq_lem), (num_example, 5)
+        print("Load and process input data")
+        self.train_qids, self.train_labels, *self.train_data, self.prompt_train_data = \
+            load_input_tensors_for_csqav2(self.args, train_statement_path, model_type, model_name, max_seq_length, "train")
+        self.dev_qids, self.dev_labels, *self.dev_data, self.prompt_dev_data = \
+            load_input_tensors_for_csqav2(self.args, dev_statement_path, model_type, model_name, max_seq_length, "eval")
+
+        # num_choice = self.train_data[0].size(1)
+
         if self.is_inhouse:
             with open(inhouse_train_qids_path, 'r') as fin:
                 inhouse_qids = set(line.strip() for line in fin)
 
             self.pseudo_test_qids, self.pseudo_test_labels, *self.pseudo_train_data, self.pseudo_prompt_train_data = \
-                load_input_tensors_for_kcr(self.args, train_statement_path, model_type, model_name,
+                load_input_tensors_for_csqav2(self.args, train_statement_path, model_type, model_name,
                                            max_seq_length, "eval")
 
-            self.inhouse_train_indexes = torch.tensor([i for i, qid in enumerate(self.train_qids) if qid in inhouse_qids])
-            self.inhouse_test_indexes = torch.tensor([i for i, qid in enumerate(self.train_qids) if qid not in inhouse_qids])
+            self.inhouse_train_indexes = torch.tensor(
+                [i for i, qid in enumerate(self.train_qids) if qid in inhouse_qids])
+            self.inhouse_test_indexes = torch.tensor(
+                [i for i, qid in enumerate(self.train_qids) if qid not in inhouse_qids])
+
 
     def __getitem__(self, index):
         raise NotImplementedError()
@@ -233,3 +260,84 @@ class NLIDataLoader(object):
     def test(self):
         return BatchGenerator(self.device, self.eval_batch_size, torch.arange(len(self.test_qids)), self.test_qids,
                               self.test_labels, tensors=self.test_data, prompt_data=self.prompt_test_data)
+
+class MixedDataLoader(object):
+
+    def __init__(self, args, train_statement_path, dev_statement_path, test_statement_path,
+                 batch_size, eval_batch_size, device, model_name,
+                 max_seq_length=128, num_label=3, is_inhouse=True, inhouse_train_qids_path=None):
+        super().__init__()
+        self.args = args
+        self.batch_size = batch_size
+        self.eval_batch_size = eval_batch_size
+        self.device = device
+        self.is_inhouse = is_inhouse
+
+        model_class = MODEL_NAME_TO_CLASS[model_name]
+
+        # (num_example), (num_example, 5, max_seq_lem), (num_example, 5)
+        print("Load and process input nli data")
+        self.train_nli_qids, self.train_nli_labels, *self.train_nli_data, self.prompt_nli_train_data = \
+            load_input_tensors_for_nli(self.args, args.train_nli_path, model_class, model_name, max_seq_length,
+                                       "train", num_label, cache=self.args.cache)
+
+        print("Load and process input csqa data")
+        self.train_csqa_qids, self.train_csqa_labels, *self.train_csqa_data, self.prompt_csqa_train_data = \
+            load_input_tensors_for_kcr(self.args, train_statement_path, model_class, model_name, max_seq_length, "train")
+
+        self.dev_qids, self.dev_labels, *self.dev_data, self.prompt_dev_data = \
+            load_input_tensors_for_kcr(self.args, dev_statement_path, model_class, model_name, max_seq_length, "eval")
+
+        if self.is_inhouse:
+            self.pseudo_test_qids, self.pseudo_test_labels, *self.pseudo_train_data, self.pseudo_prompt_train_data = \
+                load_input_tensors_for_kcr(self.args, train_statement_path, model_class, model_name,
+                                           max_seq_length, "eval")
+            with open(inhouse_train_qids_path, 'r') as fin:
+                inhouse_qids = set(line.strip() for line in fin)
+            self.inhouse_train_csqa_indexes = [i for i, qid in enumerate(self.train_csqa_qids) if qid in inhouse_qids]
+            self.inhouse_test_indexes = [i for i, qid in enumerate(self.train_csqa_qids) if qid not in inhouse_qids]
+
+        print("Mixed csqa train data and nli train data")
+
+        self.train_nli_indexs = [ i + len(self.train_csqa_qids) for i,_ in enumerate(self.train_nli_qids)]
+        self.mixed_train_qids = self.train_csqa_qids + self.train_nli_qids
+        self.mixed_train_indexs = self.inhouse_train_csqa_indexes + self.train_nli_indexs
+        self.mixed_train_labels = torch.cat([self.train_csqa_labels, self.train_nli_labels],dim=0)
+        self.mixed_train_data = [torch.cat([csqa, nli], dim=0) for csqa, nli in zip(self.train_csqa_data, self.train_nli_data)]
+        self.mixed_prompt_train_data = [torch.cat([csqa, nli], dim=0) for csqa, nli in zip(self.prompt_csqa_train_data, self.prompt_nli_train_data)]
+
+
+
+    def __getitem__(self, index):
+        raise NotImplementedError()
+
+    def train_size(self):
+        return len(self.mixed_train_indexs)
+
+    def dev_size(self):
+        return len(self.dev_qids)
+
+    def test_size(self):
+        return len(self.pseudo_test_qids)
+
+    def train(self):
+        random.shuffle(self.mixed_train_indexs)
+        mixed_train_indexs = torch.tensor(self.mixed_train_indexs)
+        return BatchGenerator(self.device, self.batch_size, mixed_train_indexs,
+                              self.mixed_train_qids, self.mixed_train_labels, tensors=self.mixed_train_data,
+                              prompt_data=self.mixed_prompt_train_data)
+
+    def dev(self):
+        return BatchGenerator(self.device, self.eval_batch_size, torch.arange(len(self.dev_qids)), self.dev_qids,
+                              self.dev_labels, tensors=self.dev_data, prompt_data=self.prompt_dev_data)
+
+    def test(self):
+        if self.is_inhouse:
+            inhouse_test_indexes = torch.tensor(self.inhouse_test_indexes)
+            return BatchGenerator(self.device, self.eval_batch_size, inhouse_test_indexes,
+                                  self.pseudo_test_qids, self.pseudo_test_labels, tensors=self.pseudo_train_data,
+                                  prompt_data=self.pseudo_prompt_train_data)
+        else:
+            return BatchGenerator(self.device, self.eval_batch_size, torch.arange(len(self.test_qids)),
+                                  self.test_qids, self.test_labels, tensors=self.test_data,
+                                  prompt_data=self.prompt_test_data)

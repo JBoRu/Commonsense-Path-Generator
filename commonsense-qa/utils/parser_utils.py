@@ -57,15 +57,25 @@ def add_data_arguments(parser):
     parser.add_argument('--ir', default=0, type=int)
     parser.add_argument('--has_test', default=0, type=int)
     parser.add_argument('--do_pred', default=0, type=int)
-    parser.add_argument('--train_statements', default='./data/{dataset}/{ir}statement/csqa_kcr/train.statement.jsonl')
-    parser.add_argument('--dev_statements', default='./data/{dataset}/{ir}statement/csqa_kcr/dev.statement.jsonl')
-    parser.add_argument('--test_statements', default='./data/{dataset}/{ir}statement/csqa_kcr/test.statement.jsonl')
+    # parser.add_argument('--train_statements', default='./data/{dataset}/{ir}statement/csqa_kcr/train.statement.jsonl')
+    # parser.add_argument('--dev_statements', default='./data/{dataset}/{ir}statement/csqa_kcr/dev.statement.jsonl')
+    # parser.add_argument('--test_statements', default='./data/{dataset}/{ir}statement/csqa_kcr/test.statement.jsonl')
+    # parser.add_argument('--train_nli_path', default='./data/snli/train_filter_5_5_5v1.txt')
+    parser.add_argument('--train_statements', default='./data/{dataset}/CSQA2_train.json')
+    parser.add_argument('--dev_statements', default='./data/{dataset}/CSQA2_dev.json')
+    parser.add_argument('--test_statements', default='./data/{dataset}/CSQA2_test_no_answers.json')
     # parser.add_argument('--train_statements', default='./data/{dataset}/{ir}statement/train.statement.jsonl')
     # parser.add_argument('--dev_statements', default='./data/{dataset}/{ir}statement/dev.statement.jsonl')
     # parser.add_argument('--test_statements', default='./data/{dataset}/{ir}statement/test.statement.jsonl')
-    # parser.add_argument('--train_statements', default='./data/{dataset}/train.txt')
-    # parser.add_argument('--dev_statements', default='./data/{dataset}/dev.txt')
-    # parser.add_argument('--test_statements', default='./data/{dataset}/test.txt')
+    # parser.add_argument('--train_statements', default='./data/{dataset}/train_filter_15_7_2v1.txt')
+    # parser.add_argument('--dev_statements', default='./data/{dataset}/dev_filter_15_7_2v1.txt')
+    # parser.add_argument('--test_statements', default='./data/{dataset}/test_filter_15_7_2v1.txt')
+    # parser.add_argument('--train_statements', default='./data/{dataset}/train_filter_12_7_2v1.txt')
+    # parser.add_argument('--dev_statements', default='./data/{dataset}/dev_filter_12_7_2v1.txt')
+    # parser.add_argument('--test_statements', default='./data/{dataset}/test_filter_12_7_2v1.txt')
+    # parser.add_argument('--train_statements', default='./data/{dataset}/train_filter_5_5_5v1.txt')
+    # parser.add_argument('--dev_statements', default='./data/{dataset}/dev_filter_5_5_5v1.txt')
+    # parser.add_argument('--test_statements', default='./data/{dataset}/test_filter_5_5_5v1.txt')
     # parser.add_argument('--train_statements', default='./data/{dataset}/train_postprocess_choose_1.txt')
     # parser.add_argument('--dev_statements', default='./data/{dataset}/dev_postprocess_choose_1.txt')
     # parser.add_argument('--test_statements', default='./data/{dataset}/test_postprocess_choose_1.txt')
@@ -111,7 +121,7 @@ def add_encoder_arguments(parser):
 
 
 def add_optimization_arguments(parser):
-    parser.add_argument('--loss', default='cross_entropy', choices=['margin_rank', 'cross_entropy'], help='model type')
+    parser.add_argument('--loss', default='cross_entropy', help='model type')
     parser.add_argument('--optim', default='radam', choices=['sgd', 'adam', 'adamw', 'radam'], help='learning rate scheduler')
     parser.add_argument('--lr_schedule', default='fixed', help='learning rate scheduler')
     parser.add_argument('-bs', '--batch_size', default=32, type=int)
@@ -124,6 +134,8 @@ def add_optimization_arguments(parser):
     parser.add_argument('--n_epochs', default=100, type=int, help='total number of training epochs to perform.')
     parser.add_argument('-me', '--max_epochs_before_stop', default=3, type=int, help='stop training if dev does not increase for N epochs')
     parser.add_argument('--margin', default=0.15, type=float, help='margin of ranking loss')
+    parser.add_argument('--num_choice', default=5, type=int, help='number of choice which decide the size of logit outputed by model')
+
 
 
 
